@@ -1,0 +1,1788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#1a1410" />
+<title>Realm of Ash — 3D RPG Prototype</title>
+<style>
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0a0805;
+    color: #e9dcb6;
+    font-family: 'Georgia', 'Times New Roman', serif;
+    overscroll-behavior: none;
+  }
+  #game-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+  }
+  /* HUD overlay, never blocks input unless explicitly noted */
+  #ui {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 10;
+    overflow: hidden;
+  }
+  /* Vignette + film-grain feel via radial gradient overlay */
+  #vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at center,
+      rgba(0,0,0,0) 45%,
+      rgba(0,0,0,0.35) 80%,
+      rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+  }
+  /* Crosshair aim pointer locked dead-center */
+  #crosshair {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 22px;
+    height: 22px;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    filter: drop-shadow(0 0 2px rgba(0,0,0,0.9));
+  }
+  #crosshair::before, #crosshair::after {
+    content: '';
+    position: absolute;
+    background: rgba(233, 220, 182, 0.9);
+  }
+  #crosshair::before {
+    left: 50%;
+    top: 0;
+    width: 1.5px;
+    height: 100%;
+    transform: translateX(-50%);
+  }
+  #crosshair::after {
+    top: 50%;
+    left: 0;
+    height: 1.5px;
+    width: 100%;
+    transform: translateY(-50%);
+  }
+  #crosshair .dot {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: rgba(255, 220, 140, 1);
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 6px rgba(255, 200, 100, 0.9);
+  }
+  /* Top-left HUD: HP, stamina */
+  #vitals {
+    position: absolute;
+    left: 24px;
+    top: 24px;
+    width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.9);
+  }
+  .bar {
+    height: 14px;
+    background: rgba(20, 14, 10, 0.7);
+    border: 1px solid rgba(120, 100, 70, 0.5);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 1px 1px rgba(0,0,0,0.6);
+  }
+  .bar .fill {
+    height: 100%;
+    transition: width 0.18s ease-out;
+  }
+  #hp .fill { background: linear-gradient(180deg, #b53024, #6b1a14); }
+  #stam .fill { background: linear-gradient(180deg, #79b143, #3d6a1f); }
+  .bar .label {
+    position: absolute;
+    left: 8px;
+    top: -2px;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: #d9c898;
+    text-transform: uppercase;
+  }
+  /* Top-right: FPS */
+  #fps {
+    position: absolute;
+    right: 18px;
+    top: 18px;
+    font-size: 12px;
+    color: rgba(220, 200, 150, 0.7);
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    letter-spacing: 1px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.9);
+  }
+  /* Bottom-center: title text fade-in */
+  #title-card {
+    position: absolute;
+    left: 50%;
+    top: 38%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 1.6s ease;
+  }
+  #title-card h1 {
+    font-size: 44px;
+    letter-spacing: 8px;
+    font-weight: 400;
+    color: #e9dcb6;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.95), 0 0 30px rgba(180, 130, 60, 0.4);
+  }
+  #title-card p {
+    margin-top: 14px;
+    font-size: 13px;
+    letter-spacing: 4px;
+    color: rgba(200, 180, 130, 0.85);
+    text-transform: uppercase;
+  }
+  #title-card.fade { opacity: 0; }
+  /* Click to start (desktop pointer lock) */
+  #start-prompt {
+    position: absolute;
+    left: 50%;
+    top: 58%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    background: rgba(15, 10, 6, 0.65);
+    border: 1px solid rgba(150, 120, 80, 0.4);
+    padding: 14px 22px;
+    border-radius: 2px;
+    pointer-events: auto;
+    cursor: pointer;
+    color: #e9dcb6;
+    font-size: 14px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    backdrop-filter: blur(2px);
+    transition: opacity 0.4s, transform 0.2s;
+  }
+  #start-prompt:hover { transform: translate(-50%, -50%) scale(1.03); background: rgba(40, 26, 14, 0.7); }
+  #start-prompt.hidden { display: none; }
+  #start-prompt .hint {
+    display: block;
+    margin-top: 8px;
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: rgba(180, 160, 120, 0.75);
+    text-transform: none;
+  }
+  /* Mobile virtual joystick (bottom-left) */
+  #joystick {
+    position: absolute;
+    left: 28px;
+    bottom: 28px;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(40,30,20,0.35), rgba(20,15,10,0.5));
+    border: 1.5px solid rgba(190, 160, 110, 0.35);
+    pointer-events: auto;
+    display: none;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.5), inset 0 2px 6px rgba(0,0,0,0.5);
+  }
+  #joystick.active { display: block; }
+  #joystick .stick {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, rgba(220, 200, 150, 0.85), rgba(120, 90, 50, 0.7));
+    border: 1.5px solid rgba(60, 45, 30, 0.7);
+    transform: translate(-50%, -50%);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.6), inset 0 -2px 4px rgba(0,0,0,0.3);
+    transition: transform 0.04s linear;
+  }
+  /* Action buttons (bottom-right) */
+  #action-buttons {
+    position: absolute;
+    right: 22px;
+    bottom: 28px;
+    display: none;
+    flex-direction: column-reverse;
+    gap: 14px;
+    pointer-events: auto;
+  }
+  #action-buttons.active { display: flex; }
+  .ab-row {
+    display: flex;
+    gap: 14px;
+  }
+  .ab {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, rgba(180, 60, 50, 0.85), rgba(80, 20, 18, 0.85));
+    border: 1.5px solid rgba(40, 20, 18, 0.8);
+    color: #f3e6c0;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.6), inset 0 -2px 4px rgba(0,0,0,0.3);
+    pointer-events: auto;
+    user-select: none;
+  }
+  .ab.dodge { background: radial-gradient(circle at 35% 30%, rgba(80, 110, 160, 0.85), rgba(30, 50, 90, 0.85)); }
+  .ab.sprint { background: radial-gradient(circle at 35% 30%, rgba(180, 160, 70, 0.85), rgba(100, 80, 30, 0.85)); width: 56px; height: 56px; font-size: 10px; }
+  .ab:active { transform: scale(0.92); filter: brightness(1.2); }
+  /* Bottom-left below joystick: controls hint (desktop only) */
+  #hint {
+    position: absolute;
+    left: 24px;
+    bottom: 18px;
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: rgba(200, 180, 130, 0.55);
+    text-transform: uppercase;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  }
+  #hint.mobile-hidden { display: none; }
+  /* Hit flash overlay */
+  #hit-flash {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle, rgba(255,30,20,0) 30%, rgba(180,20,15,0.45) 100%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease-out;
+  }
+  /* "YOU DIED" — Soulslike */
+  #death {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at center, rgba(40,4,4,0.85), rgba(0,0,0,0.95));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 1.4s ease;
+  }
+  #death.show { opacity: 1; pointer-events: auto; }
+  #death .msg {
+    font-size: 64px;
+    letter-spacing: 14px;
+    color: #aa1a14;
+    font-weight: 400;
+    text-shadow: 0 0 22px rgba(160, 20, 14, 0.7), 0 2px 4px rgba(0,0,0,0.9);
+    font-style: italic;
+  }
+  #death .sub {
+    position: absolute;
+    bottom: 24%;
+    font-size: 12px;
+    letter-spacing: 6px;
+    color: rgba(220, 200, 150, 0.6);
+    text-transform: uppercase;
+    cursor: pointer;
+    pointer-events: auto;
+  }
+</style>
+</head>
+<body>
+<canvas id="game-canvas"></canvas>
+<div id="ui">
+  <div id="vignette"></div>
+  <div id="crosshair"><div class="dot"></div></div>
+  <div id="vitals">
+    <div class="bar" id="hp"><div class="fill" style="width:100%"></div><div class="label">Vigor</div></div>
+    <div class="bar" id="stam"><div class="fill" style="width:100%"></div><div class="label">Endurance</div></div>
+  </div>
+  <div id="fps">— FPS</div>
+  <div id="title-card">
+    <h1>REALM OF ASH</h1>
+    <p>A Prototype</p>
+  </div>
+  <div id="start-prompt">
+    Click to Begin
+    <span class="hint">WASD move &middot; Mouse aim &middot; LMB attack &middot; Space dodge &middot; Shift sprint</span>
+  </div>
+  <div id="hint">WASD &middot; Mouse &middot; LMB attack &middot; Space dodge &middot; Shift sprint &middot; Esc release</div>
+  <div id="joystick"><div class="stick"></div></div>
+  <div id="action-buttons">
+    <div class="ab-row"><div class="ab sprint" id="btn-sprint">Dash</div></div>
+    <div class="ab-row"><div class="ab dodge" id="btn-dodge">Roll</div><div class="ab" id="btn-attack">Atk</div></div>
+  </div>
+  <div id="hit-flash"></div>
+  <div id="death"><div class="msg">YOU DIED</div><div class="sub">Tap to rise again</div></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+/* ============================================================
+ * Realm of Ash — 3D RPG Prototype
+ * Single-file Three.js scene. No external assets.
+ * ============================================================ */
+import * as THREE from 'three';
+
+// ---------- Capability detection ----------
+const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+// ---------- Renderer ----------
+const canvas = document.getElementById('game-canvas');
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  powerPreference: 'high-performance',
+  stencil: false,
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+// ---------- Scene / Camera ----------
+const scene = new THREE.Scene();
+const FOG_COLOR = new THREE.Color(0xb8a47d);
+scene.fog = new THREE.FogExp2(FOG_COLOR, 0.012);
+scene.background = FOG_COLOR;
+
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 600);
+
+// ---------- Lighting ----------
+const hemi = new THREE.HemisphereLight(0xfff0c8, 0x4a3a26, 0.55);
+scene.add(hemi);
+
+const SUN_OFFSET = new THREE.Vector3(60, 90, 40);
+const SUN_DIR_NORMALIZED = SUN_OFFSET.clone().normalize();
+const sun = new THREE.DirectionalLight(0xffd5a0, 1.25);
+sun.position.copy(SUN_OFFSET);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 220;
+sun.shadow.camera.left = -36;
+sun.shadow.camera.right = 36;
+sun.shadow.camera.top = 36;
+sun.shadow.camera.bottom = -36;
+sun.shadow.bias = -0.0008;
+sun.shadow.normalBias = 0.04;
+scene.add(sun);
+scene.add(sun.target);
+
+// Warm bounce/fill from "ash"
+const fill = new THREE.DirectionalLight(0xc8a0d0, 0.18);
+fill.position.set(-50, 30, -40);
+scene.add(fill);
+
+// ---------- Sky (custom shader dome) ----------
+const skyGeo = new THREE.SphereGeometry(400, 32, 16);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  uniforms: {
+    uTopColor: { value: new THREE.Color(0x52617e) },
+    uHorizon:  { value: new THREE.Color(0xd9b988) },
+    uGlow:     { value: new THREE.Color(0xf6c98a) },
+    uSunDir:   { value: SUN_DIR_NORMALIZED.clone() },
+    uTime:     { value: 0 },
+  },
+  vertexShader: `
+    varying vec3 vWorldPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vWorldPos;
+    uniform vec3 uTopColor;
+    uniform vec3 uHorizon;
+    uniform vec3 uGlow;
+    uniform vec3 uSunDir;
+    uniform float uTime;
+
+    // cheap value-noise hash
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      vec2 u = f*f*(3.0-2.0*f);
+      return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+    }
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      for (int i = 0; i < 4; i++) {
+        v += a * noise(p);
+        p *= 2.05;
+        a *= 0.5;
+      }
+      return v;
+    }
+    void main() {
+      vec3 dir = normalize(vWorldPos);
+      float h = clamp(dir.y * 1.1, 0.0, 1.0);
+      vec3 col = mix(uHorizon, uTopColor, smoothstep(0.0, 0.55, h));
+      // sun glow disc
+      float sunAmt = max(dot(dir, normalize(uSunDir)), 0.0);
+      float disc = smoothstep(0.985, 0.999, sunAmt);
+      float halo = pow(sunAmt, 6.0) * 0.6;
+      col += uGlow * (disc * 1.6 + halo);
+      // floating ash haze
+      vec2 uv = dir.xz / max(0.18, dir.y + 0.18);
+      float ash = fbm(uv * 3.0 + uTime * 0.012);
+      col += vec3(0.08, 0.06, 0.04) * ash * (1.0 - h*0.7);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+});
+const sky = new THREE.Mesh(skyGeo, skyMat);
+sky.frustumCulled = false;
+scene.add(sky);
+
+// ---------- Noise helper for terrain & placement ----------
+// deterministic 2D value noise
+function vhash2(x, y) {
+  let n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+function vnoise2(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const a = vhash2(ix, iy);
+  const b = vhash2(ix + 1, iy);
+  const c = vhash2(ix, iy + 1);
+  const d = vhash2(ix + 1, iy + 1);
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  return a * (1 - ux) * (1 - uy) + b * ux * (1 - uy) + c * (1 - ux) * uy + d * ux * uy;
+}
+function fbm2(x, y) {
+  let v = 0, a = 0.5, fx = x, fy = y;
+  for (let i = 0; i < 4; i++) {
+    v += a * vnoise2(fx, fy);
+    fx *= 2.03;
+    fy *= 2.03;
+    a *= 0.5;
+  }
+  return v;
+}
+function terrainHeight(x, z) {
+  // gentle rolling hills + a low ridge
+  const a = fbm2(x * 0.018, z * 0.018) * 5.5;
+  const b = fbm2(x * 0.06 + 11.2, z * 0.06 - 4.4) * 1.4;
+  const ridge = Math.max(0, 1.0 - Math.abs(fbm2(x * 0.011 - 3.1, z * 0.011 + 7.7) - 0.5) * 3.2) * 3.0;
+  return a + b + ridge - 4.0;
+}
+
+// ---------- Terrain mesh ----------
+const TERRAIN_SIZE = 220;
+const TERRAIN_SEG = 180;
+const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEG, TERRAIN_SEG);
+terrainGeo.rotateX(-Math.PI / 2);
+{
+  const pos = terrainGeo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const cGrass = new THREE.Color(0x6c7a3a);
+  const cDirt  = new THREE.Color(0x6e5333);
+  const cStone = new THREE.Color(0x8a8275);
+  const cMoss  = new THREE.Color(0x4a5c2a);
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    const h = terrainHeight(x, z);
+    pos.setY(i, h);
+    // color by height + noise
+    const t = THREE.MathUtils.smoothstep(h, -2, 4);
+    const n = vnoise2(x * 0.4, z * 0.4);
+    const base = new THREE.Color().lerpColors(cMoss, cGrass, n);
+    const top  = new THREE.Color().lerpColors(cDirt, cStone, n * 0.7);
+    const col  = new THREE.Color().lerpColors(base, top, t);
+    colors[i * 3] = col.r;
+    colors[i * 3 + 1] = col.g;
+    colors[i * 3 + 2] = col.b;
+  }
+  terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  terrainGeo.computeVertexNormals();
+}
+const terrainMat = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.95,
+  metalness: 0.0,
+  flatShading: false,
+});
+const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+// ---------- Trees (instanced) ----------
+function buildTreeMesh(count) {
+  const trunkGeo = new THREE.CylinderGeometry(0.32, 0.5, 4.5, 6, 1);
+  trunkGeo.translate(0, 2.25, 0);
+  const leavesGeo = new THREE.ConeGeometry(2.0, 4.5, 7, 2);
+  leavesGeo.translate(0, 6.0, 0);
+  const leaves2 = new THREE.ConeGeometry(1.6, 3.2, 7, 1);
+  leaves2.translate(0, 7.4, 0);
+
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3e2a18, roughness: 1.0 });
+  const leafMat  = new THREE.MeshStandardMaterial({ color: 0x4a5e2b, roughness: 0.9 });
+
+  const trunkInst  = new THREE.InstancedMesh(trunkGeo,  trunkMat, count);
+  const leavesInst = new THREE.InstancedMesh(leavesGeo, leafMat,  count);
+  const leaves2Inst= new THREE.InstancedMesh(leaves2,   leafMat,  count);
+  trunkInst.castShadow = true;
+  leavesInst.castShadow = true;
+  leaves2Inst.castShadow = true;
+  trunkInst.receiveShadow = false;
+
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  let placed = 0;
+  let attempts = 0;
+  while (placed < count && attempts < count * 30) {
+    attempts++;
+    const x = (Math.random() - 0.5) * (TERRAIN_SIZE - 20);
+    const z = (Math.random() - 0.5) * (TERRAIN_SIZE - 20);
+    if (x * x + z * z < 80) continue; // keep starting area open
+    const h = terrainHeight(x, z);
+    if (h < -1.5) continue;
+    const scale = 0.7 + Math.random() * 0.9;
+    p.set(x, h - 0.1, z);
+    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2);
+    s.set(scale, scale * (0.9 + Math.random() * 0.3), scale);
+    m.compose(p, q, s);
+    trunkInst.setMatrixAt(placed, m);
+    leavesInst.setMatrixAt(placed, m);
+    leaves2Inst.setMatrixAt(placed, m);
+    placed++;
+  }
+  trunkInst.count = placed;
+  leavesInst.count = placed;
+  leaves2Inst.count = placed;
+  trunkInst.instanceMatrix.needsUpdate = true;
+  leavesInst.instanceMatrix.needsUpdate = true;
+  leaves2Inst.instanceMatrix.needsUpdate = true;
+
+  scene.add(trunkInst);
+  scene.add(leavesInst);
+  scene.add(leaves2Inst);
+}
+buildTreeMesh(180);
+
+// ---------- Rocks (instanced) ----------
+function buildRocks(count) {
+  const rockGeo = new THREE.IcosahedronGeometry(1, 0);
+  // randomize vertices slightly for variety once on geometry
+  const rp = rockGeo.attributes.position;
+  for (let i = 0; i < rp.count; i++) {
+    rp.setX(i, rp.getX(i) + (vhash2(i, 1) - 0.5) * 0.4);
+    rp.setY(i, rp.getY(i) + (vhash2(i, 2) - 0.5) * 0.4);
+    rp.setZ(i, rp.getZ(i) + (vhash2(i, 3) - 0.5) * 0.4);
+  }
+  rockGeo.computeVertexNormals();
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x6a6258, roughness: 0.92, flatShading: true });
+  const inst = new THREE.InstancedMesh(rockGeo, rockMat, count);
+  inst.castShadow = true;
+  inst.receiveShadow = true;
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  for (let i = 0; i < count; i++) {
+    const x = (Math.random() - 0.5) * (TERRAIN_SIZE - 12);
+    const z = (Math.random() - 0.5) * (TERRAIN_SIZE - 12);
+    const h = terrainHeight(x, z);
+    const scl = 0.4 + Math.random() * 1.6;
+    p.set(x, h + scl * 0.4, z);
+    q.setFromEuler(new THREE.Euler(Math.random() * 0.6, Math.random() * Math.PI * 2, Math.random() * 0.6));
+    s.set(scl, scl * (0.6 + Math.random() * 0.6), scl);
+    m.compose(p, q, s);
+    inst.setMatrixAt(i, m);
+  }
+  inst.instanceMatrix.needsUpdate = true;
+  scene.add(inst);
+}
+buildRocks(90);
+
+// ---------- Grass tufts (instanced, flat planes) ----------
+function buildGrass(count) {
+  const g = new THREE.PlaneGeometry(0.6, 0.9, 1, 1);
+  g.translate(0, 0.45, 0);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x6f8a3a,
+    side: THREE.DoubleSide,
+    roughness: 1.0,
+    transparent: true,
+    alphaTest: 0.5,
+  });
+  // simple alpha-leaf shape via canvas texture
+  const cv = document.createElement('canvas');
+  cv.width = 32; cv.height = 48;
+  const ctx = cv.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 48);
+  grad.addColorStop(0, 'rgba(170,200,90,1)');
+  grad.addColorStop(1, 'rgba(60,90,30,1)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(16, 0); ctx.lineTo(28, 48); ctx.lineTo(4, 48);
+  ctx.closePath(); ctx.fill();
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  mat.map = tex;
+  mat.alphaMap = tex;
+  const inst = new THREE.InstancedMesh(g, mat, count);
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  let placed = 0;
+  for (let i = 0; i < count; i++) {
+    const x = (Math.random() - 0.5) * (TERRAIN_SIZE - 8);
+    const z = (Math.random() - 0.5) * (TERRAIN_SIZE - 8);
+    const h = terrainHeight(x, z);
+    if (h < -1.5) continue;
+    const scl = 0.7 + Math.random() * 0.7;
+    p.set(x, h, z);
+    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2);
+    s.set(scl, scl, scl);
+    m.compose(p, q, s);
+    inst.setMatrixAt(placed++, m);
+  }
+  inst.count = placed;
+  inst.instanceMatrix.needsUpdate = true;
+  scene.add(inst);
+}
+buildGrass(1200);
+
+// ---------- Procedural character (player & enemies) ----------
+function makeMat(color, opts = {}) {
+  return new THREE.MeshStandardMaterial({
+    color, roughness: opts.roughness ?? 0.6, metalness: opts.metalness ?? 0.05, ...opts
+  });
+}
+
+/**
+ * Build a humanoid character with a simple skeleton of Object3D joints
+ * so we can drive procedural animations.
+ * Returns { root, joints }
+ */
+function buildCharacter(palette) {
+  const root = new THREE.Group();
+  const joints = {};
+
+  // body materials
+  const cloth   = makeMat(palette.cloth,  { roughness: 0.85 });
+  const skin    = makeMat(palette.skin,   { roughness: 0.7 });
+  const leather = makeMat(palette.leather,{ roughness: 0.6 });
+  const metal   = makeMat(palette.metal,  { roughness: 0.32, metalness: 0.85 });
+  const hairMat = makeMat(palette.hair,   { roughness: 0.75 });
+
+  // ----- pelvis -----
+  const pelvis = new THREE.Group();
+  pelvis.position.y = 1.05;
+  root.add(pelvis);
+  joints.pelvis = pelvis;
+
+  const pelvisMesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.3, 0.36), leather);
+  pelvisMesh.castShadow = true; pelvisMesh.receiveShadow = true;
+  pelvis.add(pelvisMesh);
+
+  // ----- torso -----
+  const torso = new THREE.Group();
+  pelvis.add(torso);
+  joints.torso = torso;
+  const torsoMesh = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.38), cloth);
+  torsoMesh.position.y = 0.4;
+  torsoMesh.castShadow = true; torsoMesh.receiveShadow = true;
+  torso.add(torsoMesh);
+  // shoulder pads
+  const padL = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), metal);
+  padL.position.set(-0.34, 0.7, 0); padL.castShadow = true;
+  torso.add(padL);
+  const padR = padL.clone(); padR.position.x = 0.34; torso.add(padR);
+  // chest emblem
+  const emblem = new THREE.Mesh(new THREE.CircleGeometry(0.07, 12), makeMat(palette.emblem, { emissive: palette.emblem, emissiveIntensity: 0.4 }));
+  emblem.position.set(0, 0.55, 0.2);
+  torso.add(emblem);
+
+  // ----- head -----
+  const neck = new THREE.Group();
+  neck.position.y = 0.78;
+  torso.add(neck);
+  const head = new THREE.Group();
+  neck.add(head);
+  joints.head = head;
+  const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.21, 16, 14), skin);
+  headMesh.position.y = 0.18;
+  headMesh.castShadow = true;
+  head.add(headMesh);
+  // hair cap
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.225, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.6), hairMat);
+  hair.position.y = 0.2;
+  head.add(hair);
+
+  // ----- arms -----
+  function buildArm(side) {
+    const sx = side === 'L' ? -1 : 1;
+    const shoulder = new THREE.Group();
+    shoulder.position.set(sx * 0.34, 0.65, 0);
+    torso.add(shoulder);
+
+    const upperArm = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.07, 0.42, 8), cloth);
+    upperArm.position.y = -0.21;
+    upperArm.castShadow = true;
+    shoulder.add(upperArm);
+
+    const elbow = new THREE.Group();
+    elbow.position.y = -0.42;
+    shoulder.add(elbow);
+
+    const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.4, 8), leather);
+    forearm.position.y = -0.20;
+    forearm.castShadow = true;
+    elbow.add(forearm);
+
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.12, 0.09), skin);
+    hand.position.y = -0.45;
+    hand.castShadow = true;
+    elbow.add(hand);
+
+    joints[`shoulder${side}`] = shoulder;
+    joints[`elbow${side}`] = elbow;
+    joints[`hand${side}`] = hand;
+    return { shoulder, elbow, hand };
+  }
+  const armL = buildArm('L');
+  const armR = buildArm('R');
+
+  // ----- legs -----
+  function buildLeg(side) {
+    const sx = side === 'L' ? -1 : 1;
+    const hip = new THREE.Group();
+    hip.position.set(sx * 0.14, -0.04, 0);
+    pelvis.add(hip);
+
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.085, 0.5, 8), leather);
+    thigh.position.y = -0.25;
+    thigh.castShadow = true;
+    hip.add(thigh);
+
+    const knee = new THREE.Group();
+    knee.position.y = -0.5;
+    hip.add(knee);
+
+    const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.07, 0.5, 8), leather);
+    shin.position.y = -0.25;
+    shin.castShadow = true;
+    knee.add(shin);
+
+    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.08, 0.28), leather);
+    foot.position.set(0, -0.54, 0.05);
+    foot.castShadow = true;
+    knee.add(foot);
+
+    joints[`hip${side}`] = hip;
+    joints[`knee${side}`] = knee;
+    return { hip, knee };
+  }
+  const legL = buildLeg('L');
+  const legR = buildLeg('R');
+
+  // ----- sword in right hand -----
+  const swordGroup = new THREE.Group();
+  swordGroup.rotation.x = Math.PI * 0.5; // hilt aligned with hand
+  armR.hand.add(swordGroup);
+  swordGroup.position.set(0, -0.08, 0);
+
+  const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.16, 8), makeMat(0x2a1a0e));
+  hilt.position.y = 0;
+  swordGroup.add(hilt);
+  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.03, 0.05), metal);
+  guard.position.y = 0.09;
+  swordGroup.add(guard);
+  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.95, 0.018), metal);
+  blade.position.y = 0.6;
+  blade.castShadow = true;
+  swordGroup.add(blade);
+  const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), makeMat(palette.emblem, { emissive: palette.emblem, emissiveIntensity: 0.5 }));
+  pommel.position.y = -0.08;
+  swordGroup.add(pommel);
+
+  joints.sword = swordGroup;
+  joints.blade = blade;
+
+  return { root, joints };
+}
+
+// ---------- Player ----------
+const playerPalette = {
+  cloth:   0x1a2238,
+  skin:    0xc4a07a,
+  leather: 0x3c2614,
+  metal:   0xc9c2b0,
+  hair:    0x2a1a10,
+  emblem:  0xffb24a,
+};
+const playerChar = buildCharacter(playerPalette);
+scene.add(playerChar.root);
+
+const player = {
+  obj: playerChar.root,
+  joints: playerChar.joints,
+  pos: new THREE.Vector3(0, 0, 0),
+  vel: new THREE.Vector3(),
+  facing: 0, // yaw, radians
+  hp: 100, hpMax: 100,
+  stam: 100, stamMax: 100,
+  state: 'idle', // idle | run | attack | roll | hit | dead
+  stateTime: 0,
+  walkPhase: 0,
+  attackCooldown: 0,
+  iframes: 0,
+  alive: true,
+  speed: 0,
+};
+
+// ---------- Enemies ----------
+const enemies = [];
+function spawnEnemy(x, z) {
+  const palette = {
+    cloth:   0x2a1410,
+    skin:    0x8a8480,
+    leather: 0x1f120a,
+    metal:   0x4a4338,
+    hair:    0x0a0a08,
+    emblem:  0xc8302a,
+  };
+  const ch = buildCharacter(palette);
+  scene.add(ch.root);
+  const e = {
+    obj: ch.root,
+    joints: ch.joints,
+    pos: new THREE.Vector3(x, 0, z),
+    vel: new THREE.Vector3(),
+    facing: 0,
+    hp: 50, hpMax: 50,
+    state: 'idle',
+    stateTime: 0,
+    walkPhase: 0,
+    attackTimer: 0,
+    target: new THREE.Vector3(x, 0, z),
+    targetTimer: 0,
+    alive: true,
+    aggro: false,
+    speed: 0,
+  };
+  enemies.push(e);
+}
+for (let i = 0; i < 8; i++) {
+  const a = Math.random() * Math.PI * 2;
+  const r = 14 + Math.random() * 60;
+  spawnEnemy(Math.cos(a) * r, Math.sin(a) * r);
+}
+
+// ---------- Character animation ----------
+function setPose(c, pose) {
+  const j = c.joints;
+  for (const k in pose) {
+    if (!j[k]) continue;
+    const v = pose[k];
+    if (v.x !== undefined) j[k].rotation.x = v.x;
+    if (v.y !== undefined) j[k].rotation.y = v.y;
+    if (v.z !== undefined) j[k].rotation.z = v.z;
+  }
+}
+
+// Animation procedurally driven per frame
+function animateCharacter(c, info, dt) {
+  // info: { state, speed (0..1), phaseAdvance, stateTime, attackProgress, rollProgress }
+  const j = c.joints;
+
+  // Base "rest" pose reset
+  j.torso.rotation.set(0, 0, 0);
+  j.head.rotation.set(0, 0, 0);
+  j.pelvis.position.y = 1.05;
+  j.shoulderL.rotation.set(0, 0, 0.05);
+  j.shoulderR.rotation.set(0, 0, -0.05);
+  j.elbowL.rotation.set(-0.15, 0, 0);
+  j.elbowR.rotation.set(-0.15, 0, 0);
+  j.hipL.rotation.set(0, 0, 0);
+  j.hipR.rotation.set(0, 0, 0);
+  j.kneeL.rotation.set(0, 0, 0);
+  j.kneeR.rotation.set(0, 0, 0);
+
+  const t = info.stateTime;
+
+  if (info.state === 'idle') {
+    // subtle breathing + sway
+    const br = Math.sin(t * 2.0) * 0.025;
+    j.torso.rotation.x = br;
+    j.head.rotation.y = Math.sin(t * 0.5) * 0.08;
+    j.shoulderL.rotation.x = Math.sin(t * 2.0 + 0.5) * 0.04;
+    j.shoulderR.rotation.x = Math.sin(t * 2.0) * 0.04 - 0.05;
+    j.elbowR.rotation.x = -0.25 + Math.sin(t * 2.0) * 0.04;
+    j.elbowL.rotation.x = -0.2;
+  } else if (info.state === 'run') {
+    // run/walk cycle: legs alternate, arms counter-swing
+    const phase = info.phase;
+    const amp = 0.5 + info.speed * 0.4; // bigger swing when sprinting
+    const armAmp = 0.85 + info.speed * 0.35;
+    const leg = Math.sin(phase);
+    const legB = Math.sin(phase + Math.PI);
+    j.hipL.rotation.x =  leg * amp;
+    j.hipR.rotation.x =  legB * amp;
+    j.kneeL.rotation.x = Math.max(0, -Math.cos(phase)) * 0.9;
+    j.kneeR.rotation.x = Math.max(0, -Math.cos(phase + Math.PI)) * 0.9;
+
+    j.shoulderL.rotation.x = -leg * armAmp * 0.6 - 0.15;
+    j.shoulderR.rotation.x = -legB * armAmp * 0.6 - 0.15;
+    j.elbowL.rotation.x = -0.45 - Math.max(0, leg) * 0.4;
+    j.elbowR.rotation.x = -0.55 - Math.max(0, legB) * 0.35;
+
+    // body bob & lean
+    j.pelvis.position.y = 1.05 + Math.abs(Math.cos(phase * 2)) * 0.06;
+    j.torso.rotation.x = -0.15 - info.speed * 0.1;
+    j.torso.rotation.z = Math.sin(phase * 2) * 0.06;
+    j.head.rotation.x = 0.1;
+  } else if (info.state === 'attack') {
+    // attack swing 0..1
+    const p = info.attackProgress;
+    // wind-up (0-0.25): raise sword above head over right shoulder
+    // swing (0.25-0.6): slash from upper-right to lower-left
+    // recover (0.6-1.0): return to guard
+    let armX, armZ, elbow, torsoY;
+    if (p < 0.25) {
+      const k = p / 0.25;
+      armX = THREE.MathUtils.lerp(-0.15, -2.4, k);
+      armZ = THREE.MathUtils.lerp(-0.05, -0.7, k);
+      elbow = THREE.MathUtils.lerp(-0.15, -1.4, k);
+      torsoY = THREE.MathUtils.lerp(0, -0.5, k);
+    } else if (p < 0.6) {
+      const k = (p - 0.25) / 0.35;
+      armX = THREE.MathUtils.lerp(-2.4, 1.2, k * k);
+      armZ = THREE.MathUtils.lerp(-0.7, 0.9, k);
+      elbow = THREE.MathUtils.lerp(-1.4, -0.2, k);
+      torsoY = THREE.MathUtils.lerp(-0.5, 0.7, k);
+    } else {
+      const k = (p - 0.6) / 0.4;
+      armX = THREE.MathUtils.lerp(1.2, -0.15, k);
+      armZ = THREE.MathUtils.lerp(0.9, -0.05, k);
+      elbow = THREE.MathUtils.lerp(-0.2, -0.15, k);
+      torsoY = THREE.MathUtils.lerp(0.7, 0, k);
+    }
+    j.shoulderR.rotation.x = armX;
+    j.shoulderR.rotation.z = armZ;
+    j.elbowR.rotation.x = elbow;
+    j.torso.rotation.y = torsoY;
+    // left arm braced
+    j.shoulderL.rotation.x = -0.6;
+    j.shoulderL.rotation.z = 0.25;
+    j.elbowL.rotation.x = -1.1;
+    // legs in slight crouch
+    j.hipL.rotation.x = -0.15;
+    j.hipR.rotation.x = -0.15;
+    j.kneeL.rotation.x = 0.3;
+    j.kneeR.rotation.x = 0.3;
+    j.pelvis.position.y = 1.0;
+  } else if (info.state === 'roll') {
+    // tucked roll forward — full body rotates over X
+    const p = info.rollProgress;
+    const r = p * Math.PI * 2;
+    j.torso.rotation.x = -r * 0.5;
+    j.pelvis.position.y = 1.05 - Math.sin(p * Math.PI) * 0.55;
+    j.hipL.rotation.x = -1.4;
+    j.hipR.rotation.x = -1.4;
+    j.kneeL.rotation.x = 1.7;
+    j.kneeR.rotation.x = 1.7;
+    j.shoulderL.rotation.x = -2.2;
+    j.shoulderR.rotation.x = -2.2;
+    j.elbowL.rotation.x = -1.6;
+    j.elbowR.rotation.x = -1.6;
+    j.head.rotation.x = -0.5;
+  } else if (info.state === 'hit') {
+    const p = info.stateTime / 0.45;
+    const flinch = Math.sin(Math.min(1, p) * Math.PI);
+    j.torso.rotation.x = -0.5 * flinch;
+    j.torso.rotation.z = 0.25 * flinch;
+    j.head.rotation.x = -0.4 * flinch;
+    j.shoulderL.rotation.z = 0.4 * flinch;
+    j.shoulderR.rotation.z = -0.4 * flinch;
+  } else if (info.state === 'dead') {
+    j.torso.rotation.x = -1.3;
+    j.pelvis.position.y = 0.3;
+    j.hipL.rotation.x = -0.6;
+    j.hipR.rotation.x = -0.6;
+    j.kneeL.rotation.x = 0.8;
+    j.kneeR.rotation.x = 0.8;
+    j.shoulderL.rotation.x = -1.2;
+    j.shoulderR.rotation.x = -1.2;
+    j.head.rotation.x = 0.4;
+  }
+}
+
+// ---------- Particles (hit sparks, dust) ----------
+const particles = [];
+const PARTICLE_GEO = new THREE.SphereGeometry(0.06, 6, 5);
+function spark(pos, color, count = 12, speedScale = 1, life = 0.6, gravity = -9) {
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
+  for (let i = 0; i < count; i++) {
+    const m = new THREE.Mesh(PARTICLE_GEO, mat);
+    m.position.copy(pos);
+    const dir = new THREE.Vector3(
+      (Math.random() - 0.5),
+      Math.random() * 0.9 + 0.2,
+      (Math.random() - 0.5),
+    ).normalize().multiplyScalar((2 + Math.random() * 3) * speedScale);
+    scene.add(m);
+    particles.push({
+      mesh: m, vel: dir,
+      life: life * (0.7 + Math.random() * 0.5),
+      maxLife: life * (0.7 + Math.random() * 0.5),
+      gravity,
+      shared: true,
+    });
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) {
+      scene.remove(p.mesh);
+      particles.splice(i, 1);
+      continue;
+    }
+    p.vel.y += p.gravity * dt;
+    p.mesh.position.addScaledVector(p.vel, dt);
+    p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
+  }
+}
+
+// ---------- Camera controller (over-the-shoulder, locked aim) ----------
+const cam = {
+  yaw: 0,
+  pitch: -0.12,
+  distance: 4.4,
+  shoulderOffset: 0.85,   // shift target right -> player visually left of crosshair
+  heightOffset: 1.55,
+  smoothPos: new THREE.Vector3(),
+  smoothTarget: new THREE.Vector3(),
+  initialized: false,
+  shake: 0,
+};
+
+const _tmpV = new THREE.Vector3();
+const _tmpV2 = new THREE.Vector3();
+function updateCamera(dt) {
+  // target = player head position
+  const head = _tmpV.set(player.pos.x, player.pos.y + cam.heightOffset, player.pos.z);
+
+  // forward (camera looks toward) at yaw=0 is +Z: forward = (sinY, 0, cosY)
+  // screen-right (in world) = forward × up = (-cosY, 0, sinY)
+  const cosY = Math.cos(cam.yaw), sinY = Math.sin(cam.yaw);
+  const right = _tmpV2.set(-cosY, 0, sinY);
+  // Offset target in screen-right so crosshair sits over right shoulder
+  // and the player avatar is rendered to the screen's LEFT of the crosshair.
+  const target = head.clone().addScaledVector(right, cam.shoulderOffset);
+
+  // Camera position: behind target along yaw, raised by pitch
+  const cp = Math.cos(cam.pitch);
+  const sp = Math.sin(cam.pitch);
+  const camPos = new THREE.Vector3(
+    target.x - sinY * cp * cam.distance,
+    target.y - sp * cam.distance + 0.2, // tiny lift
+    target.z - cosY * cp * cam.distance,
+  );
+
+  // Prevent camera from going underground
+  const groundAt = terrainHeight(camPos.x, camPos.z) + 0.45;
+  if (camPos.y < groundAt) camPos.y = groundAt;
+
+  if (!cam.initialized) {
+    cam.smoothPos.copy(camPos);
+    cam.smoothTarget.copy(target);
+    cam.initialized = true;
+  } else {
+    // smooth follow for "high FPS" feel
+    const k = 1 - Math.pow(0.001, dt); // exponential smoothing
+    cam.smoothPos.lerp(camPos, Math.min(1, k * 1.3));
+    cam.smoothTarget.lerp(target, Math.min(1, k * 1.8));
+  }
+
+  // Camera shake
+  const shakeAmt = cam.shake;
+  cam.shake = Math.max(0, cam.shake - dt * 6);
+  const shake = shakeAmt > 0 ? new THREE.Vector3(
+    (Math.random() - 0.5) * shakeAmt,
+    (Math.random() - 0.5) * shakeAmt,
+    (Math.random() - 0.5) * shakeAmt,
+  ) : null;
+
+  camera.position.copy(cam.smoothPos);
+  if (shake) camera.position.add(shake);
+  camera.lookAt(cam.smoothTarget);
+}
+
+// ---------- Input ----------
+const keys = Object.create(null);
+const input = {
+  // movement axes in camera-relative space
+  moveX: 0, moveY: 0,
+  // camera deltas this frame
+  lookDX: 0, lookDY: 0,
+  attackPressed: false,
+  rollPressed: false,
+  sprint: false,
+  pointerLocked: false,
+};
+
+// Keyboard
+window.addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { input.rollPressed = true; e.preventDefault(); }
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = true;
+});
+window.addEventListener('keyup', (e) => {
+  keys[e.code] = false;
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = false;
+});
+
+// Pointer lock (desktop)
+const startPrompt = document.getElementById('start-prompt');
+const titleCard = document.getElementById('title-card');
+function requestStart() {
+  if (isTouch) {
+    startPrompt.classList.add('hidden');
+    titleCard.classList.add('fade');
+    document.getElementById('joystick').classList.add('active');
+    document.getElementById('action-buttons').classList.add('active');
+    document.getElementById('hint').classList.add('mobile-hidden');
+    return;
+  }
+  canvas.requestPointerLock?.();
+}
+startPrompt.addEventListener('click', requestStart);
+canvas.addEventListener('click', () => {
+  if (!isTouch && !input.pointerLocked) canvas.requestPointerLock?.();
+});
+document.addEventListener('pointerlockchange', () => {
+  input.pointerLocked = document.pointerLockElement === canvas;
+  if (input.pointerLocked) {
+    startPrompt.classList.add('hidden');
+    titleCard.classList.add('fade');
+  } else if (player.alive) {
+    startPrompt.classList.remove('hidden');
+  }
+});
+
+// Mouse look + attack
+window.addEventListener('mousemove', (e) => {
+  if (!input.pointerLocked) return;
+  input.lookDX += e.movementX || 0;
+  input.lookDY += e.movementY || 0;
+});
+window.addEventListener('mousedown', (e) => {
+  if (!input.pointerLocked) return;
+  if (e.button === 0) input.attackPressed = true;
+});
+
+// Touch joystick + camera drag + buttons
+const joystick = document.getElementById('joystick');
+const stick = joystick.querySelector('.stick');
+let joyTouchId = null;
+let camTouchId = null;
+let joyCenter = { x: 0, y: 0 };
+const JOY_RADIUS = 56;
+
+joystick.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (joyTouchId !== null) return;
+  const t = e.changedTouches[0];
+  joyTouchId = t.identifier;
+  const r = joystick.getBoundingClientRect();
+  joyCenter.x = r.left + r.width * 0.5;
+  joyCenter.y = r.top + r.height * 0.5;
+  updateJoy(t);
+}, { passive: false });
+
+function updateJoy(t) {
+  const dx = t.clientX - joyCenter.x;
+  const dy = t.clientY - joyCenter.y;
+  const len = Math.hypot(dx, dy);
+  const clamped = Math.min(len, JOY_RADIUS);
+  const ndx = (len > 0 ? dx / len : 0) * clamped;
+  const ndy = (len > 0 ? dy / len : 0) * clamped;
+  stick.style.transform = `translate(calc(-50% + ${ndx}px), calc(-50% + ${ndy}px))`;
+  input.moveX = (len > 0 ? dx / len : 0) * (clamped / JOY_RADIUS);
+  input.moveY = (len > 0 ? dy / len : 0) * (clamped / JOY_RADIUS);
+  // Auto-sprint when stick pushed near edge
+  input.sprint = clamped > JOY_RADIUS * 0.92 || _btnSprintHeld;
+}
+
+window.addEventListener('touchmove', (e) => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyTouchId) {
+      updateJoy(t);
+      e.preventDefault();
+    } else if (t.identifier === camTouchId) {
+      input.lookDX += (t.clientX - camLastX) * 1.4;
+      input.lookDY += (t.clientY - camLastY) * 1.4;
+      camLastX = t.clientX;
+      camLastY = t.clientY;
+      e.preventDefault();
+    }
+  }
+}, { passive: false });
+
+window.addEventListener('touchend', (e) => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyTouchId) {
+      joyTouchId = null;
+      input.moveX = 0;
+      input.moveY = 0;
+      input.sprint = _btnSprintHeld;
+      stick.style.transform = `translate(-50%, -50%)`;
+    } else if (t.identifier === camTouchId) {
+      camTouchId = null;
+    }
+  }
+});
+
+// Camera drag: touches that don't start inside joystick or buttons
+let camLastX = 0, camLastY = 0;
+canvas.addEventListener('touchstart', (e) => {
+  if (camTouchId !== null) return;
+  const t = e.changedTouches[0];
+  // Ignore if it begins inside an interactive UI element
+  const el = document.elementFromPoint(t.clientX, t.clientY);
+  if (el && el.closest('#joystick, #action-buttons, #start-prompt')) return;
+  camTouchId = t.identifier;
+  camLastX = t.clientX;
+  camLastY = t.clientY;
+  if (titleCard) titleCard.classList.add('fade');
+}, { passive: false });
+
+// Action buttons
+let _btnSprintHeld = false;
+const btnAttack = document.getElementById('btn-attack');
+const btnDodge = document.getElementById('btn-dodge');
+const btnSprint = document.getElementById('btn-sprint');
+btnAttack.addEventListener('touchstart', (e) => { e.preventDefault(); input.attackPressed = true; }, { passive: false });
+btnDodge.addEventListener('touchstart',  (e) => { e.preventDefault(); input.rollPressed = true; }, { passive: false });
+btnSprint.addEventListener('touchstart', (e) => { e.preventDefault(); _btnSprintHeld = true; input.sprint = true; }, { passive: false });
+btnSprint.addEventListener('touchend',   (e) => { e.preventDefault(); _btnSprintHeld = false; input.sprint = false; }, { passive: false });
+
+// Keyboard movement read each frame
+function readKeyboardMove() {
+  if (isTouch && joyTouchId !== null) return; // joystick wins on mobile
+  let mx = 0, my = 0;
+  if (keys['KeyW'] || keys['ArrowUp'])    my -= 1;
+  if (keys['KeyS'] || keys['ArrowDown'])  my += 1;
+  if (keys['KeyA'] || keys['ArrowLeft'])  mx -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) mx += 1;
+  // normalize
+  const l = Math.hypot(mx, my);
+  if (l > 0) { mx /= l; my /= l; }
+  input.moveX = mx;
+  input.moveY = my;
+}
+
+// ---------- Resize ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+});
+
+// ---------- Combat helpers ----------
+function damageEnemy(e, dmg, fromDir) {
+  if (!e.alive) return;
+  e.hp -= dmg;
+  e.state = 'hit';
+  e.stateTime = 0;
+  // knockback
+  e.pos.addScaledVector(fromDir, 0.6);
+  spark(e.pos.clone().setY(e.pos.y + 1.0), 0xffe9a6, 16, 1.0, 0.55);
+  cam.shake = Math.max(cam.shake, 0.15);
+  hitFlashPulse(0.22, 0xff8060);
+  if (e.hp <= 0) {
+    e.alive = false;
+    e.state = 'dead';
+    e.stateTime = 0;
+    spark(e.pos.clone().setY(e.pos.y + 1.0), 0xbe2a22, 26, 1.4, 0.9);
+  }
+}
+function damagePlayer(dmg, fromDir) {
+  if (!player.alive || player.iframes > 0) return;
+  player.hp -= dmg;
+  player.state = 'hit';
+  player.stateTime = 0;
+  cam.shake = Math.max(cam.shake, 0.3);
+  hitFlashPulse(0.45, 0xff1a14);
+  spark(player.pos.clone().setY(player.pos.y + 1.0), 0xff5040, 12, 1.0, 0.45);
+  // knock back
+  player.vel.addScaledVector(fromDir, 4);
+  if (player.hp <= 0) {
+    player.hp = 0;
+    player.alive = false;
+    player.state = 'dead';
+    player.stateTime = 0;
+    showDeath();
+  }
+}
+
+const hitFlash = document.getElementById('hit-flash');
+function hitFlashPulse(intensity, color) {
+  hitFlash.style.background = `radial-gradient(circle, rgba(255,30,20,0) 25%, ${threeColToCss(color, intensity)} 100%)`;
+  hitFlash.style.opacity = '1';
+  setTimeout(() => { hitFlash.style.opacity = '0'; }, 110);
+}
+function threeColToCss(hex, alpha) {
+  const c = new THREE.Color(hex);
+  return `rgba(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)},${alpha})`;
+}
+
+// ---------- Death screen ----------
+const deathEl = document.getElementById('death');
+const deathSub = deathEl.querySelector('.sub');
+function showDeath() {
+  setTimeout(() => deathEl.classList.add('show'), 700);
+  if (input.pointerLocked) document.exitPointerLock?.();
+}
+deathEl.addEventListener('click', () => { if (deathEl.classList.contains('show')) respawn(); });
+deathEl.addEventListener('touchstart', (e) => { e.preventDefault(); if (deathEl.classList.contains('show')) respawn(); }, { passive: false });
+function respawn() {
+  deathEl.classList.remove('show');
+  player.hp = player.hpMax;
+  player.stam = player.stamMax;
+  player.alive = true;
+  player.state = 'idle';
+  player.stateTime = 0;
+  player.pos.set(0, 0, 0);
+  player.vel.set(0, 0, 0);
+  // revive enemies near spawn? Keep them dead but heal a few far ones.
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    e.state = 'idle';
+    e.aggro = false;
+  }
+}
+
+// ---------- HUD ----------
+const hpFill   = document.querySelector('#hp .fill');
+const stamFill = document.querySelector('#stam .fill');
+const fpsEl    = document.getElementById('fps');
+let fpsAccumT = 0, fpsAccumF = 0, fpsValue = 0;
+
+// ---------- Main loop ----------
+let last = performance.now() / 1000;
+let timeAccum = 0;
+
+function gameStep(dt) {
+  timeAccum += dt;
+  skyMat.uniforms.uTime.value = timeAccum;
+
+  readKeyboardMove();
+
+  // ---- Camera rotation from mouse/touch deltas ----
+  // Drag mouse/finger right -> view rotates right (yaw increases so forward goes +Z -> +X)
+  // Drag mouse/finger down -> view tilts down (pitch decreases -> camera higher above target)
+  const sens = isTouch ? 0.0045 : 0.0022;
+  cam.yaw   += input.lookDX * sens;
+  cam.pitch -= input.lookDY * sens;
+  cam.pitch = Math.max(-1.05, Math.min(0.7, cam.pitch));
+  input.lookDX = 0;
+  input.lookDY = 0;
+
+  // ---- Player movement (camera-relative) ----
+  if (player.alive) {
+    const cosY = Math.cos(cam.yaw), sinY = Math.sin(cam.yaw);
+    // forward in world XZ (direction the camera looks toward target) = (sinY, cosY)
+    // screen-right in world XZ = (-cosY, sinY)
+    // W (moveY=-1) -> push player in +forward; D (moveX=+1) -> push in +screen-right.
+    const fwdX = sinY,  fwdZ = cosY;
+    const rgtX = -cosY, rgtZ = sinY;
+    const wishX = rgtX * input.moveX + fwdX * (-input.moveY);
+    const wishZ = rgtZ * input.moveX + fwdZ * (-input.moveY);
+    const wishLen = Math.hypot(wishX, wishZ);
+
+    // base speeds
+    const baseWalk = 3.4;
+    const baseRun  = 6.5;
+    let targetSpeed = 0;
+    let canSprint = input.sprint && player.stam > 5;
+    if (wishLen > 0.01) targetSpeed = canSprint ? baseRun : baseWalk;
+
+    // Lock movement during attack/roll
+    let allowMove = true;
+    if (player.state === 'attack') {
+      // limited drift forward during swing
+      allowMove = false;
+    }
+    if (player.state === 'roll') {
+      allowMove = false; // rolling sets its own velocity
+    }
+    if (player.state === 'hit') {
+      allowMove = false;
+    }
+
+    // Accel toward target
+    if (allowMove) {
+      const accel = 22;
+      const wishNX = wishLen > 0 ? wishX / wishLen : 0;
+      const wishNZ = wishLen > 0 ? wishZ / wishLen : 0;
+      const desired = new THREE.Vector3(wishNX * targetSpeed, 0, wishNZ * targetSpeed);
+      player.vel.x = THREE.MathUtils.damp(player.vel.x, desired.x, accel * 0.25, dt);
+      player.vel.z = THREE.MathUtils.damp(player.vel.z, desired.z, accel * 0.25, dt);
+    } else {
+      // damp horizontal velocity strongly
+      player.vel.x = THREE.MathUtils.damp(player.vel.x, 0, 8, dt);
+      player.vel.z = THREE.MathUtils.damp(player.vel.z, 0, 8, dt);
+    }
+
+    // Roll velocity
+    if (player.state === 'roll') {
+      const t = player.stateTime;
+      const dur = 0.55;
+      const sp = Math.max(0, 1 - t / dur) * 11;
+      player.vel.x = Math.sin(player.rollDir) * sp;
+      player.vel.z = Math.cos(player.rollDir) * sp;
+    }
+
+    // Apply velocity
+    player.pos.x += player.vel.x * dt;
+    player.pos.z += player.vel.z * dt;
+
+    // clamp inside terrain bounds
+    const bound = TERRAIN_SIZE * 0.5 - 4;
+    player.pos.x = Math.max(-bound, Math.min(bound, player.pos.x));
+    player.pos.z = Math.max(-bound, Math.min(bound, player.pos.z));
+    player.pos.y = terrainHeight(player.pos.x, player.pos.z);
+
+    // Face movement direction smoothly
+    const hSpeed = Math.hypot(player.vel.x, player.vel.z);
+    if (hSpeed > 0.5 && player.state !== 'attack' && player.state !== 'hit') {
+      const wantFacing = Math.atan2(player.vel.x, player.vel.z);
+      let diff = wantFacing - player.facing;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      player.facing += diff * Math.min(1, dt * 12);
+    }
+    player.speed = hSpeed;
+
+    // ---- State transitions ----
+    player.stateTime += dt;
+    player.iframes = Math.max(0, player.iframes - dt);
+    player.attackCooldown = Math.max(0, player.attackCooldown - dt);
+
+    if (player.state === 'attack' && player.stateTime > 0.65) {
+      player.state = (player.speed > 0.3 ? 'run' : 'idle');
+      player.stateTime = 0;
+    }
+    if (player.state === 'roll' && player.stateTime > 0.55) {
+      player.state = 'idle';
+      player.stateTime = 0;
+      player.iframes = 0.05;
+    }
+    if (player.state === 'hit' && player.stateTime > 0.45) {
+      player.state = 'idle';
+      player.stateTime = 0;
+    }
+
+    // Trigger attack
+    if (input.attackPressed) {
+      input.attackPressed = false;
+      if (player.attackCooldown <= 0 && player.stam > 12 && (player.state === 'idle' || player.state === 'run')) {
+        player.state = 'attack';
+        player.stateTime = 0;
+        player.attackCooldown = 0.65;
+        player.stam -= 14;
+        player._didAttackHit = false;
+      }
+    }
+    // Trigger roll
+    if (input.rollPressed) {
+      input.rollPressed = false;
+      if (player.stam > 18 && (player.state === 'idle' || player.state === 'run')) {
+        player.state = 'roll';
+        player.stateTime = 0;
+        player.stam -= 22;
+        player.iframes = 0.45;
+        // direction: movement input direction, or current facing if no input
+        if (wishLen > 0.05) {
+          player.rollDir = Math.atan2(wishX / wishLen, wishZ / wishLen);
+        } else {
+          player.rollDir = player.facing;
+        }
+        player.facing = player.rollDir;
+      }
+    }
+
+    // walk phase for running animation
+    if (player.state === 'run' || (player.state === 'idle' && player.speed > 0.4)) {
+      const sprintBoost = canSprint ? 1.25 : 1.0;
+      player.walkPhase += dt * (4.2 + player.speed * 0.4) * sprintBoost;
+    } else if (player.state === 'idle') {
+      player.walkPhase = 0;
+    }
+    if (player.speed > 0.4 && player.state !== 'attack' && player.state !== 'roll' && player.state !== 'hit') {
+      if (player.state !== 'attack' && player.state !== 'roll' && player.state !== 'hit') {
+        player.state = 'run';
+      }
+    } else if (player.state === 'run' && player.speed < 0.3) {
+      player.state = 'idle';
+      player.stateTime = 0;
+    }
+
+    // Stamina regen when not sprinting/attacking
+    const sprinting = (player.state === 'run' && canSprint && hSpeed > baseWalk + 0.3);
+    if (!sprinting && player.state !== 'attack' && player.state !== 'roll') {
+      player.stam = Math.min(player.stamMax, player.stam + dt * 28);
+    } else if (sprinting) {
+      player.stam = Math.max(0, player.stam - dt * 14);
+    }
+
+    // Apply transform
+    player.obj.position.copy(player.pos);
+    player.obj.rotation.y = player.facing;
+
+    // Attack hit detection during swing window (0.25..0.55 of attack)
+    if (player.state === 'attack' && !player._didAttackHit) {
+      if (player.stateTime > 0.18 && player.stateTime < 0.5) {
+        const range = 2.2;
+        const cone = Math.cos(Math.PI * 0.45); // ~80° cone
+        for (const e of enemies) {
+          if (!e.alive) continue;
+          const dx = e.pos.x - player.pos.x;
+          const dz = e.pos.z - player.pos.z;
+          const d = Math.hypot(dx, dz);
+          if (d < range) {
+            const fx = Math.sin(player.facing);
+            const fz = Math.cos(player.facing);
+            const dot = (dx / Math.max(0.001, d)) * fx + (dz / Math.max(0.001, d)) * fz;
+            if (dot > cone) {
+              player._didAttackHit = true;
+              const dir = new THREE.Vector3(fx, 0, fz);
+              damageEnemy(e, 28, dir);
+            }
+          }
+        }
+      }
+    }
+
+    // Animation drive
+    const aniInfo = {
+      state: player.state,
+      stateTime: player.stateTime,
+      phase: player.walkPhase,
+      speed: Math.min(1, player.speed / baseRun),
+      attackProgress: Math.min(1, player.stateTime / 0.65),
+      rollProgress: Math.min(1, player.stateTime / 0.55),
+    };
+    if (player.state === 'idle' && player.speed > 0.4) aniInfo.state = 'run';
+    animateCharacter(playerChar, aniInfo, dt);
+  } else {
+    // dead: keep posed, run animation update for "dead"
+    player.stateTime += dt;
+    animateCharacter(playerChar, { state: 'dead', stateTime: player.stateTime, phase: 0, speed: 0, attackProgress: 0, rollProgress: 0 }, dt);
+  }
+
+  // ---- Enemies ----
+  for (const e of enemies) {
+    if (!e.alive) {
+      // ground them
+      e.pos.y = terrainHeight(e.pos.x, e.pos.z);
+      e.obj.position.copy(e.pos);
+      animateCharacter({ joints: e.joints }, { state: 'dead', stateTime: 1, phase: 0, speed: 0, attackProgress: 0, rollProgress: 0 }, dt);
+      continue;
+    }
+    e.stateTime += dt;
+    e.attackTimer = Math.max(0, e.attackTimer - dt);
+
+    const dx = player.pos.x - e.pos.x;
+    const dz = player.pos.z - e.pos.z;
+    const distToP = Math.hypot(dx, dz);
+
+    // aggro check
+    if (player.alive && distToP < 12) e.aggro = true;
+    if (!player.alive) e.aggro = false;
+    if (distToP > 28) e.aggro = false;
+
+    let speed = 0;
+    let wishX = 0, wishZ = 0;
+
+    if (e.state === 'hit') {
+      if (e.stateTime > 0.45) { e.state = 'idle'; e.stateTime = 0; }
+    } else if (e.state === 'attack') {
+      // commit to attack
+      if (e.stateTime > 0.32 && e.stateTime < 0.5 && !e._didHit) {
+        // check player range
+        if (player.alive && distToP < 1.9) {
+          const dir = new THREE.Vector3(-dx / Math.max(0.001, distToP), 0, -dz / Math.max(0.001, distToP));
+          damagePlayer(12, dir);
+          e._didHit = true;
+        }
+      }
+      if (e.stateTime > 0.75) {
+        e.state = 'idle';
+        e.stateTime = 0;
+        e._didHit = false;
+        e.attackTimer = 1.1 + Math.random() * 0.7;
+      }
+    } else if (e.aggro && player.alive) {
+      if (distToP > 1.6) {
+        // chase
+        wishX = dx / Math.max(0.001, distToP);
+        wishZ = dz / Math.max(0.001, distToP);
+        speed = 3.6;
+        e.state = 'run';
+      } else if (e.attackTimer <= 0) {
+        e.state = 'attack';
+        e.stateTime = 0;
+        e._didHit = false;
+      } else {
+        e.state = 'idle';
+      }
+    } else {
+      // patrol
+      e.targetTimer -= dt;
+      const tdx = e.target.x - e.pos.x, tdz = e.target.z - e.pos.z;
+      const tdist = Math.hypot(tdx, tdz);
+      if (e.targetTimer <= 0 || tdist < 0.6) {
+        const a = Math.random() * Math.PI * 2;
+        const r = 5 + Math.random() * 7;
+        e.target.set(e.pos.x + Math.cos(a) * r, 0, e.pos.z + Math.sin(a) * r);
+        e.targetTimer = 3 + Math.random() * 3;
+      } else {
+        wishX = tdx / Math.max(0.001, tdist);
+        wishZ = tdz / Math.max(0.001, tdist);
+        speed = 1.7;
+        e.state = 'run';
+      }
+    }
+
+    // velocity
+    if (e.state === 'attack' || e.state === 'hit') {
+      e.vel.x = THREE.MathUtils.damp(e.vel.x, 0, 10, dt);
+      e.vel.z = THREE.MathUtils.damp(e.vel.z, 0, 10, dt);
+    } else {
+      e.vel.x = THREE.MathUtils.damp(e.vel.x, wishX * speed, 6, dt);
+      e.vel.z = THREE.MathUtils.damp(e.vel.z, wishZ * speed, 6, dt);
+    }
+    e.pos.x += e.vel.x * dt;
+    e.pos.z += e.vel.z * dt;
+    e.pos.y = terrainHeight(e.pos.x, e.pos.z);
+
+    const hsp = Math.hypot(e.vel.x, e.vel.z);
+    e.speed = hsp;
+    if (hsp > 0.4 && e.state === 'run') {
+      const want = Math.atan2(e.vel.x, e.vel.z);
+      let d = want - e.facing;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      e.facing += d * Math.min(1, dt * 10);
+    } else if (player.alive && (e.state === 'attack' || (e.aggro && distToP < 2.5))) {
+      const want = Math.atan2(dx, dz);
+      let d = want - e.facing;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      e.facing += d * Math.min(1, dt * 6);
+    }
+    e.obj.position.copy(e.pos);
+    e.obj.rotation.y = e.facing;
+
+    if (e.state === 'run') e.walkPhase += dt * (4.0 + hsp * 0.3);
+    const eAni = {
+      state: e.state,
+      stateTime: e.stateTime,
+      phase: e.walkPhase,
+      speed: Math.min(1, hsp / 4),
+      attackProgress: Math.min(1, e.stateTime / 0.75),
+      rollProgress: 0,
+    };
+    animateCharacter({ joints: e.joints }, eAni, dt);
+  }
+
+  updateParticles(dt);
+  updateCamera(dt);
+
+  // Sun & shadow follow the player so shadows stay sharp far from origin
+  sun.target.position.copy(player.pos);
+  sun.target.updateMatrixWorld();
+  sun.position.set(
+    player.pos.x + SUN_OFFSET.x,
+    player.pos.y + SUN_OFFSET.y,
+    player.pos.z + SUN_OFFSET.z,
+  );
+
+  // HUD
+  hpFill.style.width   = (Math.max(0, player.hp / player.hpMax) * 100).toFixed(1) + '%';
+  stamFill.style.width = (Math.max(0, player.stam / player.stamMax) * 100).toFixed(1) + '%';
+  fpsAccumT += dt; fpsAccumF++;
+  if (fpsAccumT >= 0.4) {
+    fpsValue = Math.round(fpsAccumF / fpsAccumT);
+    fpsAccumT = 0; fpsAccumF = 0;
+    fpsEl.textContent = fpsValue + ' FPS';
+  }
+}
+
+function frame(now) {
+  const t = now / 1000;
+  let dt = t - last;
+  last = t;
+  if (dt > 0.1) dt = 0.1; // clamp big steps
+  gameStep(dt);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+// Initial pose
+animateCharacter(playerChar, { state: 'idle', stateTime: 0, phase: 0, speed: 0, attackProgress: 0, rollProgress: 0 }, 0);
+player.obj.position.copy(player.pos);
+
+requestAnimationFrame(frame);
+
+// Hide title card after a moment regardless
+setTimeout(() => titleCard.classList.add('fade'), 4500);
+</script>
+</body>
+</html>
