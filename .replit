@@ -1,0 +1,31 @@
+# Replit configuration for Realm of Ash.
+# This makes the project runnable from a *completely empty* Replit
+# (no language template required) — Replit reads this file, provisions
+# the declared module, and the Run button executes the command below.
+#
+# If your Replit's `.replit` schema differs from this in 2026, the same
+# effect can be reproduced manually:
+#     1. Open the Shell tab.
+#     2. Run:  python3 main.py
+#     3. Open the Webview at the URL Replit prints.
+
+entrypoint = "index.html"
+run = "python3 main.py"
+
+# Nix-based modular environment: pull in a Python interpreter.
+modules = ["python-3.11"]
+
+[nix]
+channel = "stable-23_11"
+
+# Expose the local HTTP port through Replit's public webview proxy.
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+# Static deployment (Replit Deployments). The "Run" command above is for
+# the dev session; "publicDir = '.'" tells the static-host to serve the
+# repo root, which contains index.html.
+[deployment]
+deploymentTarget = "static"
+publicDir = "."
