@@ -883,6 +883,8 @@ const player = {
   stateTime: 0,
   walkPhase: 0,
   attackCooldown: 0,
+  combo: 0,
+  comboBuffered: false,
   slideCooldown: 0,
   slideDir: 0,
   iframes: 0,
@@ -941,9 +943,34 @@ function setPose(c, pose) {
   }
 }
 
+// ---------- Attack combo table ----------
+// Each hit has its own duration, damage, stamina cost, reach, active window
+// (normalized progress) and cone width (cos of half-angle).
+const ATTACK_HITS = [
+  null, // 1-indexed
+  { dur: 0.65, dmg: 28, stam: 14, range: 2.2, cone: Math.cos(Math.PI * 0.45), hitFrom: 0.30, hitTo: 0.55 }, // diagonal slash
+  { dur: 0.58, dmg: 32, stam: 12, range: 2.3, cone: Math.cos(Math.PI * 0.50), hitFrom: 0.18, hitTo: 0.45 }, // reverse horizontal
+  { dur: 0.95, dmg: 58, stam: 22, range: 2.7, cone: Math.cos(Math.PI * 0.35), hitFrom: 0.50, hitTo: 0.72 }, // overhead slam
+];
+
+// Piecewise smoothstep interpolation across [time, value] keyframes.
+// `keys` MUST be sorted by time ascending and span 0..1.
+function keyLerp(p, keys) {
+  if (p <= keys[0][0]) return keys[0][1];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const a = keys[i], b = keys[i + 1];
+    if (p <= b[0]) {
+      const k = (p - a[0]) / Math.max(1e-6, b[0] - a[0]);
+      const s = k * k * (3 - 2 * k); // smoothstep
+      return a[1] + (b[1] - a[1]) * s;
+    }
+  }
+  return keys[keys.length - 1][1];
+}
+
 // Animation procedurally driven per frame
 function animateCharacter(c, info, dt) {
-  // info: { state, speed (0..1), phase, stateTime, attackProgress, slideProgress, velY }
+  // info: { state, speed (0..1), phase, stateTime, attackProgress, slideProgress, velY, combo }
   const j = c.joints;
 
   // Base "rest" pose reset
@@ -961,6 +988,8 @@ function animateCharacter(c, info, dt) {
   j.kneeR.rotation.set(0, 0, 0);
   if (j.footL) j.footL.rotation.set(0, 0, 0);
   if (j.footR) j.footR.rotation.set(0, 0, 0);
+  if (j.handL) j.handL.rotation.set(0, 0, 0);
+  if (j.handR) j.handR.rotation.set(0, 0, 0);
 
   const t = info.stateTime;
 
@@ -1104,45 +1133,102 @@ function animateCharacter(c, info, dt) {
 
     j.head.rotation.x = 0.15 * settle + 0.04 * recover;
   } else if (info.state === 'attack') {
-    // attack swing 0..1
+    // Three-hit combo with full-body kinetic-linking animation.
+    // Each hit drives pelvis / torso / head / both arms / both legs / wrists /
+    // ankles independently via piecewise smoothstep keyframes.
+    const combo = info.combo || 1;
     const p = info.attackProgress;
-    // wind-up (0-0.25): raise sword above head over right shoulder
-    // swing (0.25-0.6): slash from upper-right to lower-left
-    // recover (0.6-1.0): return to guard
-    let armX, armZ, elbow, torsoY;
-    if (p < 0.25) {
-      const k = p / 0.25;
-      armX = THREE.MathUtils.lerp(-0.15, -2.4, k);
-      armZ = THREE.MathUtils.lerp(-0.05, -0.7, k);
-      elbow = THREE.MathUtils.lerp(-0.15, -1.4, k);
-      torsoY = THREE.MathUtils.lerp(0, -0.5, k);
-    } else if (p < 0.6) {
-      const k = (p - 0.25) / 0.35;
-      armX = THREE.MathUtils.lerp(-2.4, 1.2, k * k);
-      armZ = THREE.MathUtils.lerp(-0.7, 0.9, k);
-      elbow = THREE.MathUtils.lerp(-1.4, -0.2, k);
-      torsoY = THREE.MathUtils.lerp(-0.5, 0.7, k);
+
+    if (combo === 1) {
+      // --- Hit 1: Diagonal descending slash (upper-right to lower-left) ---
+      // Wind-up peaks ~0.30, blade peaks contact ~0.45, recover by 1.0.
+      // Pelvis: load right then snap left; small drop on the load.
+      j.pelvis.rotation.y    = keyLerp(p, [[0,0],[0.30, 0.55],[0.50,-0.35],[0.75,-0.18],[1.0,0]]);
+      j.pelvis.rotation.z    = keyLerp(p, [[0,0],[0.30,-0.08],[0.50, 0.10],[1.0,0]]);
+      j.pelvis.position.y    = keyLerp(p, [[0,1.05],[0.30,0.97],[0.50,1.02],[1.0,1.05]]);
+      // Torso: leads pelvis (kinetic chain) — over-rotated wind-up, whips left.
+      j.torso.rotation.y     = keyLerp(p, [[0,0],[0.30, 0.70],[0.45,-0.20],[0.55,-0.70],[1.0,-0.10]]);
+      j.torso.rotation.x     = keyLerp(p, [[0,0],[0.30, 0.05],[0.50,-0.22],[0.80,-0.05],[1.0,0]]);
+      j.torso.rotation.z     = keyLerp(p, [[0,0],[0.30, 0.10],[0.50,-0.12],[1.0,0]]);
+      // Head: tracks target through the slash.
+      j.head.rotation.y      = keyLerp(p, [[0,0],[0.30,-0.30],[0.55,-0.50],[1.0,-0.10]]);
+      j.head.rotation.x      = keyLerp(p, [[0,0],[0.30,-0.05],[0.55, 0.18],[1.0,0]]);
+      // Right (sword) arm: raise to upper-right shoulder, then whip across body.
+      j.shoulderR.rotation.x = keyLerp(p, [[0,-0.10],[0.30,-2.60],[0.45,-0.80],[0.55, 0.80],[0.75, 0.40],[1.0,-0.10]]);
+      j.shoulderR.rotation.z = keyLerp(p, [[0,-0.05],[0.30,-0.85],[0.50, 0.85],[0.75, 0.50],[1.0,-0.05]]);
+      j.shoulderR.rotation.y = keyLerp(p, [[0,0],[0.30, 0.25],[0.55,-0.15],[1.0,0]]);
+      j.elbowR.rotation.x    = keyLerp(p, [[0,-0.15],[0.30,-1.55],[0.45,-0.80],[0.55,-0.20],[0.75,-0.40],[1.0,-0.15]]);
+      j.handR.rotation.x     = keyLerp(p, [[0,0],[0.30,-0.40],[0.50,-0.55],[0.75,-0.30],[1.0,0]]);
+      j.handR.rotation.z     = keyLerp(p, [[0,0],[0.30, 0.25],[0.55,-0.25],[1.0,0]]);
+      // Left (off-hand) arm: pulled back for counter-balance, swings forward.
+      j.shoulderL.rotation.x = keyLerp(p, [[0,-0.10],[0.30,-0.50],[0.50, 0.45],[0.75, 0.20],[1.0,-0.10]]);
+      j.shoulderL.rotation.z = keyLerp(p, [[0, 0.05],[0.30, 0.55],[0.50,-0.30],[1.0, 0.05]]);
+      j.elbowL.rotation.x    = keyLerp(p, [[0,-0.15],[0.30,-1.30],[0.50,-0.50],[1.0,-0.15]]);
+      j.handL.rotation.x     = keyLerp(p, [[0,0],[0.30,-0.25],[0.50, 0.20],[1.0,0]]);
+      // Legs: weight shifts onto front (left) leg, right drags through.
+      j.hipL.rotation.x      = keyLerp(p, [[0,0],[0.30,-0.10],[0.55,-0.35],[1.0,-0.05]]);
+      j.hipR.rotation.x      = keyLerp(p, [[0,0],[0.30, 0.25],[0.55,-0.05],[1.0,0]]);
+      j.kneeL.rotation.x     = keyLerp(p, [[0,0],[0.30, 0.30],[0.55, 0.55],[1.0, 0.10]]);
+      j.kneeR.rotation.x     = keyLerp(p, [[0,0],[0.30, 0.20],[0.55, 0.25],[1.0, 0.05]]);
+      if (j.footL) j.footL.rotation.x = keyLerp(p, [[0,0],[0.30,-0.15],[0.55, 0.15],[1.0,0]]);
+      if (j.footR) j.footR.rotation.x = keyLerp(p, [[0,0],[0.30, 0.25],[0.55,-0.30],[1.0,0]]);
+
+    } else if (combo === 2) {
+      // --- Hit 2: Reverse horizontal slash (lower-left to upper-right) ---
+      // Picks up momentum from Hit 1's follow-through.
+      j.pelvis.rotation.y    = keyLerp(p, [[0,-0.18],[0.18,-0.45],[0.40, 0.35],[0.70, 0.18],[1.0,0]]);
+      j.pelvis.rotation.z    = keyLerp(p, [[0,0],[0.18, 0.07],[0.40,-0.08],[1.0,0]]);
+      j.pelvis.position.y    = keyLerp(p, [[0,1.02],[0.18,0.98],[0.40,1.02],[1.0,1.05]]);
+      j.torso.rotation.y     = keyLerp(p, [[0,-0.28],[0.18,-0.65],[0.35, 0.20],[0.45, 0.65],[1.0, 0.10]]);
+      j.torso.rotation.x     = keyLerp(p, [[0,0],[0.18,-0.05],[0.40,-0.12],[1.0,0]]);
+      j.torso.rotation.z     = keyLerp(p, [[0,0],[0.18,-0.10],[0.40, 0.10],[1.0,0]]);
+      j.head.rotation.y      = keyLerp(p, [[0,0],[0.18, 0.20],[0.45, 0.40],[1.0, 0.10]]);
+      // Right arm: blade is gathered low-left, uncoils horizontally rightward.
+      j.shoulderR.rotation.x = keyLerp(p, [[0,-0.20],[0.18,-1.10],[0.45, 0.20],[0.70,-0.05],[1.0,-0.10]]);
+      j.shoulderR.rotation.z = keyLerp(p, [[0, 0.40],[0.18, 1.00],[0.45,-0.80],[1.0,-0.05]]);
+      j.elbowR.rotation.x    = keyLerp(p, [[0,-0.60],[0.18,-1.40],[0.45,-0.30],[0.70,-0.40],[1.0,-0.15]]);
+      j.handR.rotation.x     = keyLerp(p, [[0,-0.20],[0.18,-0.35],[0.45, 0.40],[0.70,-0.10],[1.0,0]]);
+      j.handR.rotation.z     = keyLerp(p, [[0,-0.20],[0.18,-0.45],[0.45, 0.30],[1.0,0]]);
+      // Left arm: counter-pull from right-side cross to forward.
+      j.shoulderL.rotation.x = keyLerp(p, [[0, 0.10],[0.18, 0.45],[0.45,-0.45],[1.0,-0.10]]);
+      j.shoulderL.rotation.z = keyLerp(p, [[0,-0.25],[0.18,-0.60],[0.45, 0.30],[1.0, 0.05]]);
+      j.elbowL.rotation.x    = keyLerp(p, [[0,-0.45],[0.18,-0.30],[0.45,-1.10],[1.0,-0.15]]);
+      // Legs: weight transfers right, brief stance widening.
+      j.hipL.rotation.x      = keyLerp(p, [[0,-0.10],[0.18, 0.05],[0.45, 0.20],[1.0,-0.05]]);
+      j.hipR.rotation.x      = keyLerp(p, [[0,-0.05],[0.18,-0.15],[0.45,-0.30],[1.0,-0.05]]);
+      j.kneeL.rotation.x     = keyLerp(p, [[0, 0.10],[0.18, 0.20],[0.45, 0.30],[1.0, 0.10]]);
+      j.kneeR.rotation.x     = keyLerp(p, [[0, 0.10],[0.18, 0.35],[0.45, 0.45],[1.0, 0.10]]);
+      if (j.footL) j.footL.rotation.x = keyLerp(p, [[0,0],[0.18, 0.15],[0.45,-0.20],[1.0,0]]);
+      if (j.footR) j.footR.rotation.x = keyLerp(p, [[0,0],[0.18,-0.20],[0.45, 0.15],[1.0,0]]);
+
     } else {
-      const k = (p - 0.6) / 0.4;
-      armX = THREE.MathUtils.lerp(1.2, -0.15, k);
-      armZ = THREE.MathUtils.lerp(0.9, -0.05, k);
-      elbow = THREE.MathUtils.lerp(-0.2, -0.15, k);
-      torsoY = THREE.MathUtils.lerp(0.7, 0, k);
+      // --- Hit 3: Overhead two-handed vertical chop (heavy finisher) ---
+      // Slow load, explosive slam, deep low recovery before rising.
+      j.pelvis.rotation.y    = keyLerp(p, [[0, 0.10],[0.40,-0.10],[0.60, 0.15],[1.0,0]]);
+      j.pelvis.position.y    = keyLerp(p, [[0,1.05],[0.40,0.98],[0.60,0.78],[0.85,0.92],[1.0,1.05]]);
+      // Torso back-lean on wind-up, then violent forward slam, then upright.
+      j.torso.rotation.x     = keyLerp(p, [[0,0],[0.40, 0.20],[0.60,-0.55],[0.85,-0.30],[1.0,0]]);
+      j.torso.rotation.y     = keyLerp(p, [[0,0],[0.40, 0.10],[0.60,-0.05],[1.0,0]]);
+      j.head.rotation.x      = keyLerp(p, [[0,0],[0.40,-0.22],[0.60, 0.40],[0.85, 0.22],[1.0, 0.04]]);
+      // Right arm: blade raised overhead, then SLAMS straight down.
+      j.shoulderR.rotation.x = keyLerp(p, [[0,-0.10],[0.40,-3.05],[0.52,-2.50],[0.62, 0.25],[0.85,-0.05],[1.0,-0.10]]);
+      j.shoulderR.rotation.z = keyLerp(p, [[0,-0.05],[0.40,-0.05],[1.0,-0.05]]);
+      j.elbowR.rotation.x    = keyLerp(p, [[0,-0.15],[0.40,-0.40],[0.60,-0.25],[0.75,-0.30],[1.0,-0.15]]);
+      j.handR.rotation.x     = keyLerp(p, [[0,0],[0.40,-0.30],[0.60,-0.55],[0.75,-0.20],[1.0,0]]);
+      // Left arm: mirrors right for two-handed grip illusion overhead.
+      j.shoulderL.rotation.x = keyLerp(p, [[0,-0.10],[0.40,-2.65],[0.52,-2.10],[0.62, 0.45],[0.85,-0.05],[1.0,-0.10]]);
+      j.shoulderL.rotation.z = keyLerp(p, [[0, 0.05],[0.40, 0.30],[0.62,-0.10],[1.0, 0.05]]);
+      j.elbowL.rotation.x    = keyLerp(p, [[0,-0.15],[0.40,-0.40],[0.60,-0.30],[1.0,-0.15]]);
+      // Legs: wide stance load, deep front lunge on slam.
+      j.hipL.rotation.x      = keyLerp(p, [[0,0],[0.40,-0.20],[0.60,-0.65],[0.85,-0.32],[1.0,0]]);
+      j.hipR.rotation.x      = keyLerp(p, [[0,0],[0.40,-0.20],[0.60, 0.22],[0.85, 0.10],[1.0,0]]);
+      j.hipL.rotation.z      = keyLerp(p, [[0,0],[0.40, 0.10],[0.60, 0.05],[1.0,0]]);
+      j.hipR.rotation.z      = keyLerp(p, [[0,0],[0.40,-0.10],[0.60,-0.05],[1.0,0]]);
+      j.kneeL.rotation.x     = keyLerp(p, [[0,0],[0.40, 0.70],[0.60, 1.35],[0.85, 0.90],[1.0, 0.10]]);
+      j.kneeR.rotation.x     = keyLerp(p, [[0,0],[0.40, 0.70],[0.60, 0.40],[0.85, 0.30],[1.0, 0.10]]);
+      if (j.footL) j.footL.rotation.x = keyLerp(p, [[0,0],[0.40,-0.10],[0.60, 0.30],[1.0,0]]);
+      if (j.footR) j.footR.rotation.x = keyLerp(p, [[0,0],[0.40,-0.10],[0.60,-0.35],[0.85,-0.15],[1.0,0]]);
     }
-    j.shoulderR.rotation.x = armX;
-    j.shoulderR.rotation.z = armZ;
-    j.elbowR.rotation.x = elbow;
-    j.torso.rotation.y = torsoY;
-    // left arm braced
-    j.shoulderL.rotation.x = -0.6;
-    j.shoulderL.rotation.z = 0.25;
-    j.elbowL.rotation.x = -1.1;
-    // legs in slight crouch
-    j.hipL.rotation.x = -0.15;
-    j.hipR.rotation.x = -0.15;
-    j.kneeL.rotation.x = 0.3;
-    j.kneeR.rotation.x = 0.3;
-    j.pelvis.position.y = 1.0;
   } else if (info.state === 'hit') {
     const p = info.stateTime / 0.45;
     const flinch = Math.sin(Math.min(1, p) * Math.PI);
@@ -1644,9 +1730,25 @@ function gameStep(dt) {
     player.attackCooldown = Math.max(0, player.attackCooldown - dt);
     player.slideCooldown  = Math.max(0, player.slideCooldown  - dt);
 
-    if (player.state === 'attack' && player.stateTime > 0.65) {
-      player.state = (player.speed > 0.3 ? 'run' : 'idle');
-      player.stateTime = 0;
+    if (player.state === 'attack' && player.combo > 0) {
+      const cur = ATTACK_HITS[player.combo];
+      if (player.stateTime > cur.dur) {
+        if (player.comboBuffered && player.combo < 3 &&
+            player.stam > ATTACK_HITS[player.combo + 1].stam) {
+          // chain to next hit
+          player.combo += 1;
+          player.stateTime = 0;
+          player.stam -= ATTACK_HITS[player.combo].stam;
+          player._didAttackHit = false;
+          player.comboBuffered = false;
+        } else {
+          player.state = (player.speed > 0.3 ? 'run' : 'idle');
+          player.stateTime = 0;
+          player.combo = 0;
+          player.comboBuffered = false;
+          player.attackCooldown = 0.18;
+        }
+      }
     }
     if (player.state === 'slide' && player.stateTime > 0.72) {
       player.state = (player.speed > 0.3 ? 'run' : 'idle');
@@ -1662,16 +1764,22 @@ function gameStep(dt) {
       player.stateTime = 0;
     }
 
-    // Trigger attack
+    // Trigger / chain attack
     if (input.attackPressed) {
       input.attackPressed = false;
-      if (player.attackCooldown <= 0 && player.stam > 12 && player.grounded &&
-          (player.state === 'idle' || player.state === 'run')) {
+      if (player.state === 'attack' && player.combo > 0 && player.combo < 3) {
+        // Buffer the next swing during the latter half of the current hit.
+        const cur = ATTACK_HITS[player.combo];
+        if (player.stateTime > cur.dur * 0.40) player.comboBuffered = true;
+      } else if (player.attackCooldown <= 0 && player.grounded &&
+                 player.stam > ATTACK_HITS[1].stam &&
+                 (player.state === 'idle' || player.state === 'run')) {
+        player.combo = 1;
         player.state = 'attack';
         player.stateTime = 0;
-        player.attackCooldown = 0.65;
-        player.stam -= 14;
+        player.stam -= ATTACK_HITS[1].stam;
         player._didAttackHit = false;
+        player.comboBuffered = false;
       }
     }
     // Trigger jump (Space / Jump button)
@@ -1736,23 +1844,25 @@ function gameStep(dt) {
     player.obj.rotation.y = player.facing;
 
     // Attack hit detection during swing window (0.25..0.55 of attack)
-    if (player.state === 'attack' && !player._didAttackHit) {
-      if (player.stateTime > 0.18 && player.stateTime < 0.5) {
-        const range = 2.2;
-        const cone = Math.cos(Math.PI * 0.45); // ~80° cone
+    if (player.state === 'attack' && player.combo > 0 && !player._didAttackHit) {
+      const cur = ATTACK_HITS[player.combo];
+      const prog = player.stateTime / cur.dur;
+      if (prog > cur.hitFrom && prog < cur.hitTo) {
         for (const e of enemies) {
           if (!e.alive) continue;
           const dx = e.pos.x - player.pos.x;
           const dz = e.pos.z - player.pos.z;
           const d = Math.hypot(dx, dz);
-          if (d < range) {
+          if (d < cur.range) {
             const fx = Math.sin(player.facing);
             const fz = Math.cos(player.facing);
             const dot = (dx / Math.max(0.001, d)) * fx + (dz / Math.max(0.001, d)) * fz;
-            if (dot > cone) {
+            if (dot > cur.cone) {
               player._didAttackHit = true;
               const dir = new THREE.Vector3(fx, 0, fz);
-              damageEnemy(e, 28, dir);
+              damageEnemy(e, cur.dmg, dir);
+              // Heavier camera shake on the finisher.
+              if (player.combo === 3) cam.shake = Math.max(cam.shake, 0.35);
             }
           }
         }
@@ -1760,12 +1870,14 @@ function gameStep(dt) {
     }
 
     // Animation drive
+    const curHitDur = (player.state === 'attack' && player.combo > 0) ? ATTACK_HITS[player.combo].dur : 0.65;
     const aniInfo = {
       state: player.state,
       stateTime: player.stateTime,
       phase: player.walkPhase,
       speed: Math.min(1, player.speed / baseRun),
-      attackProgress: Math.min(1, player.stateTime / 0.65),
+      combo: player.combo,
+      attackProgress: Math.min(1, player.stateTime / curHitDur),
       slideProgress:  Math.min(1, player.stateTime / 0.72),
       velY: player.vel.y,
     };
@@ -1830,6 +1942,8 @@ function gameStep(dt) {
         e.state = 'attack';
         e.stateTime = 0;
         e._didHit = false;
+        // Randomize swing variant per attack (no overhead finisher for enemies).
+        e.combo = (Math.random() < 0.5 ? 1 : 2);
       } else {
         e.state = 'idle';
       }
@@ -1887,6 +2001,7 @@ function gameStep(dt) {
       stateTime: e.stateTime,
       phase: e.walkPhase,
       speed: Math.min(1, hsp / 4),
+      combo: e.combo || 1,
       attackProgress: Math.min(1, e.stateTime / 0.75),
       slideProgress: 0,
       velY: 0,
