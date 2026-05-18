@@ -1624,11 +1624,14 @@ function gameStep(dt) {
       player.grounded = false;
     }
 
-    // Face movement direction smoothly
+    // Lock avatar rotation to the camera's horizontal yaw — the body always
+    // faces the way the camera looks (over-the-shoulder aim style). Pushing
+    // the joystick / WASD sideways now strafes instead of pivoting the avatar.
+    // States that own their own facing (slide, attack, hit, dead) are skipped.
     const hSpeed = Math.hypot(player.vel.x, player.vel.z);
-    if (hSpeed > 0.5 && player.state !== 'attack' && player.state !== 'hit') {
-      const wantFacing = Math.atan2(player.vel.x, player.vel.z);
-      let diff = wantFacing - player.facing;
+    if (player.state !== 'slide' && player.state !== 'attack' &&
+        player.state !== 'hit'   && player.state !== 'dead') {
+      let diff = cam.yaw - player.facing;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       player.facing += diff * Math.min(1, dt * 12);
