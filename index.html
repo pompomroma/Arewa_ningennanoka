@@ -252,7 +252,8 @@
     pointer-events: auto;
     user-select: none;
   }
-  .ab.dodge { background: radial-gradient(circle at 35% 30%, rgba(80, 110, 160, 0.85), rgba(30, 50, 90, 0.85)); }
+  .ab.jump   { background: radial-gradient(circle at 35% 30%, rgba(110, 180, 110, 0.85), rgba(36, 90, 40, 0.85)); }
+  .ab.slide  { background: radial-gradient(circle at 35% 30%, rgba(90, 160, 200, 0.85), rgba(28, 70, 110, 0.85)); }
   .ab.sprint { background: radial-gradient(circle at 35% 30%, rgba(180, 160, 70, 0.85), rgba(100, 80, 30, 0.85)); width: 56px; height: 56px; font-size: 10px; }
   .ab:active { transform: scale(0.92); filter: brightness(1.2); }
   /* Bottom-left below joystick: controls hint (desktop only) */
@@ -325,13 +326,14 @@
   </div>
   <div id="start-prompt">
     Click to Begin
-    <span class="hint">WASD move &middot; Mouse aim &middot; LMB attack &middot; Space dodge &middot; Shift sprint</span>
+    <span class="hint">WASD move &middot; Mouse aim &middot; LMB attack &middot; Space jump &middot; Q slide &middot; Shift sprint</span>
   </div>
-  <div id="hint">WASD &middot; Mouse &middot; LMB attack &middot; Space dodge &middot; Shift sprint &middot; Esc release</div>
+  <div id="hint">WASD &middot; Mouse &middot; LMB attack &middot; Space jump &middot; Q slide &middot; Shift sprint &middot; Esc release</div>
   <div id="joystick"><div class="stick"></div></div>
   <div id="action-buttons">
-    <div class="ab-row"><div class="ab sprint" id="btn-sprint">Dash</div></div>
-    <div class="ab-row"><div class="ab dodge" id="btn-dodge">Roll</div><div class="ab" id="btn-attack">Atk</div></div>
+    <div class="ab-row"><div class="ab sprint" id="btn-sprint">Sprint</div></div>
+    <div class="ab-row"><div class="ab jump" id="btn-jump">Jump</div><div class="ab slide" id="btn-slide">Slide</div></div>
+    <div class="ab-row"><div class="ab" id="btn-attack">Atk</div></div>
   </div>
   <div id="hit-flash"></div>
   <div id="death"><div class="msg">YOU DIED</div><div class="sub">Tap to rise again</div></div>
@@ -815,14 +817,18 @@ function buildCharacter(palette) {
     shin.castShadow = true;
     knee.add(shin);
 
+    const ankle = new THREE.Group();
+    ankle.position.set(0, -0.54, 0.0);
+    knee.add(ankle);
     const foot = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.08, 0.28), leather);
-    foot.position.set(0, -0.54, 0.05);
+    foot.position.set(0, 0, 0.05);
     foot.castShadow = true;
-    knee.add(foot);
+    ankle.add(foot);
 
     joints[`hip${side}`] = hip;
     joints[`knee${side}`] = knee;
-    return { hip, knee };
+    joints[`foot${side}`] = ankle;
+    return { hip, knee, ankle };
   }
   const legL = buildLeg('L');
   const legR = buildLeg('R');
@@ -873,11 +879,14 @@ const player = {
   facing: 0, // yaw, radians
   hp: 100, hpMax: 100,
   stam: 100, stamMax: 100,
-  state: 'idle', // idle | run | attack | roll | hit | dead
+  state: 'idle', // idle | run | jump | land | slide | attack | hit | dead
   stateTime: 0,
   walkPhase: 0,
   attackCooldown: 0,
+  slideCooldown: 0,
+  slideDir: 0,
   iframes: 0,
+  grounded: true,
   alive: true,
   speed: 0,
 };
@@ -934,13 +943,14 @@ function setPose(c, pose) {
 
 // Animation procedurally driven per frame
 function animateCharacter(c, info, dt) {
-  // info: { state, speed (0..1), phaseAdvance, stateTime, attackProgress, rollProgress }
+  // info: { state, speed (0..1), phase, stateTime, attackProgress, slideProgress, velY }
   const j = c.joints;
 
   // Base "rest" pose reset
   j.torso.rotation.set(0, 0, 0);
   j.head.rotation.set(0, 0, 0);
   j.pelvis.position.y = 1.05;
+  j.pelvis.rotation.set(0, 0, 0);
   j.shoulderL.rotation.set(0, 0, 0.05);
   j.shoulderR.rotation.set(0, 0, -0.05);
   j.elbowL.rotation.set(-0.15, 0, 0);
@@ -949,6 +959,8 @@ function animateCharacter(c, info, dt) {
   j.hipR.rotation.set(0, 0, 0);
   j.kneeL.rotation.set(0, 0, 0);
   j.kneeR.rotation.set(0, 0, 0);
+  if (j.footL) j.footL.rotation.set(0, 0, 0);
+  if (j.footR) j.footR.rotation.set(0, 0, 0);
 
   const t = info.stateTime;
 
@@ -962,27 +974,135 @@ function animateCharacter(c, info, dt) {
     j.elbowR.rotation.x = -0.25 + Math.sin(t * 2.0) * 0.04;
     j.elbowL.rotation.x = -0.2;
   } else if (info.state === 'run') {
-    // run/walk cycle: legs alternate, arms counter-swing
+    // Anatomical run cycle.
+    // 'phase' advances ~3.6 rad/s base. sin(phase) drives the left leg forward,
+    // cos(phase) drives the lateral pelvic drop (Trendelenburg), pelvis & torso
+    // counter-rotate, and a 2x-frequency bob gives the vertical oscillation.
     const phase = info.phase;
-    const amp = 0.5 + info.speed * 0.4; // bigger swing when sprinting
-    const armAmp = 0.85 + info.speed * 0.35;
-    const leg = Math.sin(phase);
-    const legB = Math.sin(phase + Math.PI);
-    j.hipL.rotation.x =  leg * amp;
-    j.hipR.rotation.x =  legB * amp;
-    j.kneeL.rotation.x = Math.max(0, -Math.cos(phase)) * 0.9;
-    j.kneeR.rotation.x = Math.max(0, -Math.cos(phase + Math.PI)) * 0.9;
+    const sp    = info.speed;            // 0..1
+    const leg   = Math.sin(phase);
+    const legB  = Math.sin(phase + Math.PI);
 
-    j.shoulderL.rotation.x = -leg * armAmp * 0.6 - 0.15;
-    j.shoulderR.rotation.x = -legB * armAmp * 0.6 - 0.15;
-    j.elbowL.rotation.x = -0.45 - Math.max(0, leg) * 0.4;
-    j.elbowR.rotation.x = -0.55 - Math.max(0, legB) * 0.35;
+    // Hips swing fore/aft. Slightly smaller swing than before.
+    const hipAmp = 0.55 + sp * 0.35;
+    j.hipL.rotation.x = leg  * hipAmp;
+    j.hipR.rotation.x = legB * hipAmp;
 
-    // body bob & lean
-    j.pelvis.position.y = 1.05 + Math.abs(Math.cos(phase * 2)) * 0.06;
-    j.torso.rotation.x = -0.15 - info.speed * 0.1;
-    j.torso.rotation.z = Math.sin(phase * 2) * 0.06;
-    j.head.rotation.x = 0.1;
+    // Knees bend most during the SWING half of the cycle (leg going backward
+    // relative to body becomes "swing forward" via reversed sign on the back side).
+    // A real runner's knee tucks high on swing, stays nearly straight on stance.
+    const kneeSwingL = Math.max(0, -leg);  // 0..1 during L swing
+    const kneeSwingR = Math.max(0, -legB);
+    j.kneeL.rotation.x = 0.15 + kneeSwingL * (1.25 + sp * 0.35);
+    j.kneeR.rotation.x = 0.15 + kneeSwingR * (1.25 + sp * 0.35);
+
+    // Ankles: heel-up at toe-off (just after foot peaks back), dorsiflex on swing.
+    if (j.footL) j.footL.rotation.x = -leg  * 0.45;
+    if (j.footR) j.footR.rotation.x = -legB * 0.45;
+
+    // Arms: tight bent-elbow swing, counter to legs. Elbows stay folded ~60°.
+    const armAmp = 0.42;
+    j.shoulderL.rotation.x = -leg  * armAmp - 0.10;
+    j.shoulderR.rotation.x = -legB * armAmp - 0.10;
+    // Subtle inward/outward arm carry, gives the slight cross-body swing.
+    j.shoulderL.rotation.z =  0.10 + leg  * 0.05;
+    j.shoulderR.rotation.z = -0.10 + legB * 0.05;
+    const elbowBase = -1.05;
+    j.elbowL.rotation.x = elbowBase + leg  * 0.15;
+    j.elbowR.rotation.x = elbowBase + legB * 0.15;
+
+    // Pelvis: small vertical bob at 2x stride freq, contralateral drop, twist.
+    j.pelvis.position.y = 1.05 + Math.abs(Math.cos(phase * 2)) * 0.032;
+    j.pelvis.rotation.y =  leg          * 0.15;   // twist opposite shoulders
+    j.pelvis.rotation.z =  Math.cos(phase) * 0.045; // hip drop
+
+    // Torso: lean forward with speed, counter-rotates against pelvis, gentle sway.
+    j.torso.rotation.x = -0.12 - sp * 0.10;
+    j.torso.rotation.y = -leg * 0.10;
+    j.torso.rotation.z = Math.sin(phase * 2) * 0.018;
+
+    // Head: slight forward tilt, tracks pelvis subtly.
+    j.head.rotation.x = 0.04;
+    j.head.rotation.y = Math.sin(phase) * 0.05;
+  } else if (info.state === 'jump') {
+    // Posture driven by vertical velocity sign/magnitude.
+    const vy = info.velY ?? 0;
+    j.torso.rotation.x = -0.15;
+    if (vy > 5) {
+      // Takeoff
+      j.hipL.rotation.x = -0.45;
+      j.hipR.rotation.x = -0.55;
+      j.kneeL.rotation.x = 1.0;
+      j.kneeR.rotation.x = 1.1;
+      j.shoulderL.rotation.x = -0.95; j.elbowL.rotation.x = -1.4;
+      j.shoulderR.rotation.x = -0.85; j.elbowR.rotation.x = -1.3;
+      j.pelvis.position.y = 1.05 + 0.03;
+    } else if (vy > -5) {
+      // Apex tuck
+      j.hipL.rotation.x = -0.7;
+      j.hipR.rotation.x = -0.7;
+      j.kneeL.rotation.x = 1.4;
+      j.kneeR.rotation.x = 1.4;
+      j.shoulderL.rotation.x = 0.45; j.elbowL.rotation.x = -1.4;
+      j.shoulderR.rotation.x = 0.55; j.elbowR.rotation.x = -1.4;
+      j.pelvis.position.y = 1.05;
+    } else {
+      // Falling — legs extending for landing
+      j.hipL.rotation.x = -0.35;
+      j.hipR.rotation.x = -0.30;
+      j.kneeL.rotation.x = 0.55;
+      j.kneeR.rotation.x = 0.50;
+      j.shoulderL.rotation.x = -0.5; j.elbowL.rotation.x = -1.1;
+      j.shoulderR.rotation.x = -0.4; j.elbowR.rotation.x = -1.0;
+      j.pelvis.position.y = 1.05 - 0.02;
+    }
+    j.head.rotation.x = 0.08;
+  } else if (info.state === 'land') {
+    // Quick compression that recovers to standing.
+    const p = Math.min(1, t / 0.18);
+    const k = 1 - p;
+    j.pelvis.position.y = 1.05 - k * 0.35;
+    j.hipL.rotation.x = -0.55 * k;
+    j.hipR.rotation.x = -0.55 * k;
+    j.kneeL.rotation.x =  0.95 * k;
+    j.kneeR.rotation.x =  0.95 * k;
+    j.torso.rotation.x = -0.25 * k;
+    j.shoulderL.rotation.x = -0.35 * k; j.shoulderL.rotation.z =  0.25 * k;
+    j.shoulderR.rotation.x = -0.25 * k; j.shoulderR.rotation.z = -0.25 * k;
+    j.elbowL.rotation.x = -0.6 * k - 0.2;
+    j.elbowR.rotation.x = -0.6 * k - 0.2;
+  } else if (info.state === 'slide') {
+    // Power slide on the trailing knee; leading leg extended forward.
+    const p = Math.min(1, info.slideProgress ?? 0);
+    const recover = Math.max(0, (p - 0.75) / 0.25); // 0..1 in last 25%
+    const settle = 1 - recover;
+
+    // Lean back early, return upright on exit.
+    j.torso.rotation.x = (0.35 - p * 0.25) * settle - 0.1 * recover;
+    j.torso.rotation.z = 0.18 * settle;
+
+    // Pelvis low at start, rising on exit.
+    j.pelvis.position.y = 1.05 - (0.55 * (1 - p * p)) * settle - 0.15 * recover;
+
+    // Leading leg (R) extended forward, trailing (L) tucked under.
+    j.hipR.rotation.x = -1.15 * settle - 0.25 * recover;
+    j.kneeR.rotation.x =  0.15 * settle + 0.40 * recover;
+    j.hipL.rotation.x = -0.25 * settle - 0.15 * recover;
+    j.kneeL.rotation.x =  1.85 * settle + 0.55 * recover;
+
+    // Ankles: leading foot dorsiflexed up, trailing foot plantarflexed under.
+    if (j.footR) j.footR.rotation.x =  0.30 * settle;
+    if (j.footL) j.footL.rotation.x = -0.55 * settle;
+
+    // Arms: trailing back for balance.
+    j.shoulderL.rotation.x = -1.40 * settle - 0.2 * recover;
+    j.shoulderL.rotation.z =  0.35 * settle;
+    j.shoulderR.rotation.x = -1.00 * settle - 0.2 * recover;
+    j.shoulderR.rotation.z = -0.30 * settle;
+    j.elbowL.rotation.x = -0.9;
+    j.elbowR.rotation.x = -0.9;
+
+    j.head.rotation.x = 0.15 * settle + 0.04 * recover;
   } else if (info.state === 'attack') {
     // attack swing 0..1
     const p = info.attackProgress;
@@ -1023,21 +1143,6 @@ function animateCharacter(c, info, dt) {
     j.kneeL.rotation.x = 0.3;
     j.kneeR.rotation.x = 0.3;
     j.pelvis.position.y = 1.0;
-  } else if (info.state === 'roll') {
-    // tucked roll forward — full body rotates over X
-    const p = info.rollProgress;
-    const r = p * Math.PI * 2;
-    j.torso.rotation.x = -r * 0.5;
-    j.pelvis.position.y = 1.05 - Math.sin(p * Math.PI) * 0.55;
-    j.hipL.rotation.x = -1.4;
-    j.hipR.rotation.x = -1.4;
-    j.kneeL.rotation.x = 1.7;
-    j.kneeR.rotation.x = 1.7;
-    j.shoulderL.rotation.x = -2.2;
-    j.shoulderR.rotation.x = -2.2;
-    j.elbowL.rotation.x = -1.6;
-    j.elbowR.rotation.x = -1.6;
-    j.head.rotation.x = -0.5;
   } else if (info.state === 'hit') {
     const p = info.stateTime / 0.45;
     const flinch = Math.sin(Math.min(1, p) * Math.PI);
@@ -1170,7 +1275,8 @@ const input = {
   // camera deltas this frame
   lookDX: 0, lookDY: 0,
   attackPressed: false,
-  rollPressed: false,
+  jumpPressed: false,
+  slidePressed: false,
   sprint: false,
   pointerLocked: false,
 };
@@ -1178,7 +1284,8 @@ const input = {
 // Keyboard
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
-  if (e.code === 'Space') { input.rollPressed = true; e.preventDefault(); }
+  if (e.code === 'Space') { input.jumpPressed = true; e.preventDefault(); }
+  if (e.code === 'KeyQ')  { input.slidePressed = true; e.preventDefault(); }
   if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') input.sprint = true;
 });
 window.addEventListener('keyup', (e) => {
@@ -1304,10 +1411,12 @@ canvas.addEventListener('touchstart', (e) => {
 // Action buttons
 let _btnSprintHeld = false;
 const btnAttack = document.getElementById('btn-attack');
-const btnDodge = document.getElementById('btn-dodge');
+const btnJump   = document.getElementById('btn-jump');
+const btnSlide  = document.getElementById('btn-slide');
 const btnSprint = document.getElementById('btn-sprint');
 btnAttack.addEventListener('touchstart', (e) => { e.preventDefault(); input.attackPressed = true; }, { passive: false });
-btnDodge.addEventListener('touchstart',  (e) => { e.preventDefault(); input.rollPressed = true; }, { passive: false });
+btnJump.addEventListener('touchstart',   (e) => { e.preventDefault(); input.jumpPressed  = true; }, { passive: false });
+btnSlide.addEventListener('touchstart',  (e) => { e.preventDefault(); input.slidePressed = true; }, { passive: false });
 btnSprint.addEventListener('touchstart', (e) => { e.preventDefault(); _btnSprintHeld = true; input.sprint = true; }, { passive: false });
 btnSprint.addEventListener('touchend',   (e) => { e.preventDefault(); _btnSprintHeld = false; input.sprint = false; }, { passive: false });
 
@@ -1424,10 +1533,10 @@ function gameStep(dt) {
   readKeyboardMove();
 
   // ---- Camera rotation from mouse/touch deltas ----
-  // Drag mouse/finger right -> view rotates right (yaw increases so forward goes +Z -> +X)
-  // Drag mouse/finger down -> view tilts down (pitch decreases -> camera higher above target)
+  // Horizontal is INVERTED on request: drag mouse/finger right -> view rotates LEFT.
+  // Drag mouse/finger down -> view tilts down (pitch decreases -> camera higher above target).
   const sens = isTouch ? 0.0045 : 0.0022;
-  cam.yaw   += input.lookDX * sens;
+  cam.yaw   -= input.lookDX * sens;
   cam.pitch -= input.lookDY * sens;
   cam.pitch = Math.max(-1.05, Math.min(0.7, cam.pitch));
   input.lookDX = 0;
@@ -1452,22 +1561,21 @@ function gameStep(dt) {
     let canSprint = input.sprint && player.stam > 5;
     if (wishLen > 0.01) targetSpeed = canSprint ? baseRun : baseWalk;
 
-    // Lock movement during attack/roll
+    // Lock or attenuate horizontal control by state.
     let allowMove = true;
-    if (player.state === 'attack') {
-      // limited drift forward during swing
+    let inAir = false;
+    if (player.state === 'attack' || player.state === 'slide' || player.state === 'hit' || player.state === 'land') {
       allowMove = false;
     }
-    if (player.state === 'roll') {
-      allowMove = false; // rolling sets its own velocity
-    }
-    if (player.state === 'hit') {
+    if (player.state === 'jump') {
+      // jump allows air-control with reduced acceleration
       allowMove = false;
+      inAir = true;
     }
 
     // Accel toward target
-    if (allowMove) {
-      const accel = 22;
+    if (allowMove || inAir) {
+      const accel = inAir ? 8 : 22;
       const wishNX = wishLen > 0 ? wishX / wishLen : 0;
       const wishNZ = wishLen > 0 ? wishZ / wishLen : 0;
       const desired = new THREE.Vector3(wishNX * targetSpeed, 0, wishNZ * targetSpeed);
@@ -1479,16 +1587,17 @@ function gameStep(dt) {
       player.vel.z = THREE.MathUtils.damp(player.vel.z, 0, 8, dt);
     }
 
-    // Roll velocity
-    if (player.state === 'roll') {
+    // Slide velocity (own controller, eases out to 0).
+    if (player.state === 'slide') {
       const t = player.stateTime;
-      const dur = 0.55;
-      const sp = Math.max(0, 1 - t / dur) * 11;
-      player.vel.x = Math.sin(player.rollDir) * sp;
-      player.vel.z = Math.cos(player.rollDir) * sp;
+      const dur = 0.72;
+      const k = Math.max(0, 1 - t / dur);
+      const sp = k * k * 12;
+      player.vel.x = Math.sin(player.slideDir) * sp;
+      player.vel.z = Math.cos(player.slideDir) * sp;
     }
 
-    // Apply velocity
+    // Apply horizontal velocity.
     player.pos.x += player.vel.x * dt;
     player.pos.z += player.vel.z * dt;
 
@@ -1496,7 +1605,24 @@ function gameStep(dt) {
     const bound = TERRAIN_SIZE * 0.5 - 4;
     player.pos.x = Math.max(-bound, Math.min(bound, player.pos.x));
     player.pos.z = Math.max(-bound, Math.min(bound, player.pos.z));
-    player.pos.y = terrainHeight(player.pos.x, player.pos.z);
+
+    // Gravity + vertical integration with ground collision.
+    const GRAVITY = -28;
+    const groundY = terrainHeight(player.pos.x, player.pos.z);
+    player.vel.y += GRAVITY * dt;
+    player.pos.y += player.vel.y * dt;
+    if (player.pos.y <= groundY) {
+      const wasFalling = !player.grounded && player.vel.y < -4;
+      player.pos.y = groundY;
+      player.vel.y = 0;
+      if (!player.grounded && player.state === 'jump' && wasFalling) {
+        player.state = 'land';
+        player.stateTime = 0;
+      }
+      player.grounded = true;
+    } else {
+      player.grounded = false;
+    }
 
     // Face movement direction smoothly
     const hSpeed = Math.hypot(player.vel.x, player.vel.z);
@@ -1513,15 +1639,20 @@ function gameStep(dt) {
     player.stateTime += dt;
     player.iframes = Math.max(0, player.iframes - dt);
     player.attackCooldown = Math.max(0, player.attackCooldown - dt);
+    player.slideCooldown  = Math.max(0, player.slideCooldown  - dt);
 
     if (player.state === 'attack' && player.stateTime > 0.65) {
       player.state = (player.speed > 0.3 ? 'run' : 'idle');
       player.stateTime = 0;
     }
-    if (player.state === 'roll' && player.stateTime > 0.55) {
-      player.state = 'idle';
+    if (player.state === 'slide' && player.stateTime > 0.72) {
+      player.state = (player.speed > 0.3 ? 'run' : 'idle');
       player.stateTime = 0;
-      player.iframes = 0.05;
+      player.iframes = Math.max(player.iframes, 0.05);
+    }
+    if (player.state === 'land' && player.stateTime > 0.18) {
+      player.state = (player.speed > 0.3 ? 'run' : 'idle');
+      player.stateTime = 0;
     }
     if (player.state === 'hit' && player.stateTime > 0.45) {
       player.state = 'idle';
@@ -1531,7 +1662,8 @@ function gameStep(dt) {
     // Trigger attack
     if (input.attackPressed) {
       input.attackPressed = false;
-      if (player.attackCooldown <= 0 && player.stam > 12 && (player.state === 'idle' || player.state === 'run')) {
+      if (player.attackCooldown <= 0 && player.stam > 12 && player.grounded &&
+          (player.state === 'idle' || player.state === 'run')) {
         player.state = 'attack';
         player.stateTime = 0;
         player.attackCooldown = 0.65;
@@ -1539,43 +1671,58 @@ function gameStep(dt) {
         player._didAttackHit = false;
       }
     }
-    // Trigger roll
-    if (input.rollPressed) {
-      input.rollPressed = false;
-      if (player.stam > 18 && (player.state === 'idle' || player.state === 'run')) {
-        player.state = 'roll';
+    // Trigger jump (Space / Jump button)
+    if (input.jumpPressed) {
+      input.jumpPressed = false;
+      if (player.grounded && player.stam > 8 &&
+          (player.state === 'idle' || player.state === 'run' || player.state === 'land')) {
+        player.vel.y = 10.5;
+        player.grounded = false;
+        player.state = 'jump';
         player.stateTime = 0;
-        player.stam -= 22;
-        player.iframes = 0.45;
-        // direction: movement input direction, or current facing if no input
+        player.stam -= 8;
+      }
+    }
+    // Trigger slide (Q / Slide button)
+    if (input.slidePressed) {
+      input.slidePressed = false;
+      if (player.slideCooldown <= 0 && player.grounded && player.stam > 18 &&
+          (player.state === 'idle' || player.state === 'run')) {
+        player.state = 'slide';
+        player.stateTime = 0;
+        player.stam -= 18;
+        player.iframes = 0.35;
+        player.slideCooldown = 0.9;
         if (wishLen > 0.05) {
-          player.rollDir = Math.atan2(wishX / wishLen, wishZ / wishLen);
+          player.slideDir = Math.atan2(wishX / wishLen, wishZ / wishLen);
         } else {
-          player.rollDir = player.facing;
+          player.slideDir = player.facing;
         }
-        player.facing = player.rollDir;
+        player.facing = player.slideDir;
+        // dust kick-up at the feet
+        spark(player.pos.clone().setY(player.pos.y + 0.1), 0x9c8666, 10, 0.6, 0.5, -2);
       }
     }
 
     // walk phase for running animation
     if (player.state === 'run' || (player.state === 'idle' && player.speed > 0.4)) {
       const sprintBoost = canSprint ? 1.25 : 1.0;
-      player.walkPhase += dt * (4.2 + player.speed * 0.4) * sprintBoost;
+      player.walkPhase += dt * (3.6 + player.speed * 0.4) * sprintBoost;
     } else if (player.state === 'idle') {
       player.walkPhase = 0;
     }
-    if (player.speed > 0.4 && player.state !== 'attack' && player.state !== 'roll' && player.state !== 'hit') {
-      if (player.state !== 'attack' && player.state !== 'roll' && player.state !== 'hit') {
-        player.state = 'run';
-      }
+    // Only promote to 'run' from idle (don't override jump/slide/attack/hit/land).
+    if (player.state === 'idle' && player.speed > 0.4) {
+      player.state = 'run';
     } else if (player.state === 'run' && player.speed < 0.3) {
       player.state = 'idle';
       player.stateTime = 0;
     }
 
-    // Stamina regen when not sprinting/attacking
+    // Stamina regen when not actively spending.
     const sprinting = (player.state === 'run' && canSprint && hSpeed > baseWalk + 0.3);
-    if (!sprinting && player.state !== 'attack' && player.state !== 'roll') {
+    const spending = sprinting || player.state === 'attack' || player.state === 'slide';
+    if (!spending) {
       player.stam = Math.min(player.stamMax, player.stam + dt * 28);
     } else if (sprinting) {
       player.stam = Math.max(0, player.stam - dt * 14);
@@ -1616,14 +1763,15 @@ function gameStep(dt) {
       phase: player.walkPhase,
       speed: Math.min(1, player.speed / baseRun),
       attackProgress: Math.min(1, player.stateTime / 0.65),
-      rollProgress: Math.min(1, player.stateTime / 0.55),
+      slideProgress:  Math.min(1, player.stateTime / 0.72),
+      velY: player.vel.y,
     };
     if (player.state === 'idle' && player.speed > 0.4) aniInfo.state = 'run';
     animateCharacter(playerChar, aniInfo, dt);
   } else {
     // dead: keep posed, run animation update for "dead"
     player.stateTime += dt;
-    animateCharacter(playerChar, { state: 'dead', stateTime: player.stateTime, phase: 0, speed: 0, attackProgress: 0, rollProgress: 0 }, dt);
+    animateCharacter(playerChar, { state: 'dead', stateTime: player.stateTime, phase: 0, speed: 0, attackProgress: 0, slideProgress: 0, velY: 0 }, dt);
   }
 
   // ---- Enemies ----
@@ -1632,7 +1780,7 @@ function gameStep(dt) {
       // ground them
       e.pos.y = terrainHeight(e.pos.x, e.pos.z);
       e.obj.position.copy(e.pos);
-      animateCharacter({ joints: e.joints }, { state: 'dead', stateTime: 1, phase: 0, speed: 0, attackProgress: 0, rollProgress: 0 }, dt);
+      animateCharacter({ joints: e.joints }, { state: 'dead', stateTime: 1, phase: 0, speed: 0, attackProgress: 0, slideProgress: 0, velY: 0 }, dt);
       continue;
     }
     e.stateTime += dt;
@@ -1737,7 +1885,8 @@ function gameStep(dt) {
       phase: e.walkPhase,
       speed: Math.min(1, hsp / 4),
       attackProgress: Math.min(1, e.stateTime / 0.75),
-      rollProgress: 0,
+      slideProgress: 0,
+      velY: 0,
     };
     animateCharacter({ joints: e.joints }, eAni, dt);
   }
@@ -1776,7 +1925,7 @@ function frame(now) {
 }
 
 // Initial pose
-animateCharacter(playerChar, { state: 'idle', stateTime: 0, phase: 0, speed: 0, attackProgress: 0, rollProgress: 0 }, 0);
+animateCharacter(playerChar, { state: 'idle', stateTime: 0, phase: 0, speed: 0, attackProgress: 0, slideProgress: 0, velY: 0 }, 0);
 player.obj.position.copy(player.pos);
 
 requestAnimationFrame(frame);
