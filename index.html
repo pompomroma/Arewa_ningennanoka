@@ -887,6 +887,9 @@ const player = {
   comboBuffered: false,
   slideCooldown: 0,
   slideDir: 0,
+  shinobi: 0,           // 0..1 blend factor toward shinobi run posture
+  moveForward: 1,       // -1..1, velocity dotted with body-forward
+  moveSide: 0,          // -1..1, velocity dotted with body-right
   iframes: 0,
   grounded: true,
   alive: true,
@@ -1003,56 +1006,95 @@ function animateCharacter(c, info, dt) {
     j.elbowR.rotation.x = -0.25 + Math.sin(t * 2.0) * 0.04;
     j.elbowL.rotation.x = -0.2;
   } else if (info.state === 'run') {
-    // Anatomical run cycle.
-    // 'phase' advances ~3.6 rad/s base. sin(phase) drives the left leg forward,
-    // cos(phase) drives the lateral pelvic drop (Trendelenburg), pelvis & torso
-    // counter-rotate, and a 2x-frequency bob gives the vertical oscillation.
+    // Run cycle blended across three styles based on motion direction:
+    //   - Normal anatomical jog (sideways / slow forward).
+    //   - Shinobi sprint (forward, ramps in with speed): body lowered,
+    //     both arms straight back facing the camera, head extended forward.
+    //   - Tip-toe (sideways or backward): light cadence, plantarflexed feet,
+    //     smaller hip swing, body upright.
+    const lerp = THREE.MathUtils.lerp;
     const phase = info.phase;
     const sp    = info.speed;            // 0..1
     const leg   = Math.sin(phase);
     const legB  = Math.sin(phase + Math.PI);
 
-    // Hips swing fore/aft. Slightly smaller swing than before.
-    const hipAmp = 0.55 + sp * 0.35;
+    const fwd      = info.moveForward ?? 1;     // -1..1
+    const side     = Math.abs(info.moveSide ?? 0);
+    const shinobi  = info.shinobi ?? 0;          // 0..1 (already damped, forward-only)
+    const tiptoe   = Math.min(1, side + Math.max(0, -fwd)); // 1 when strafing or backing
+    const normalcy = (1 - shinobi) * (1 - tiptoe);            // share for vanilla jog
+
+    // ----- Hips: smaller stride on tiptoe, broader on shinobi -----
+    const hipAmpNormal  = 0.55 + sp * 0.35;
+    const hipAmpShinobi = 0.85 + sp * 0.25;
+    const hipAmpTiptoe  = 0.30;
+    const hipAmp = hipAmpNormal * normalcy + hipAmpShinobi * shinobi + hipAmpTiptoe * tiptoe;
     j.hipL.rotation.x = leg  * hipAmp;
     j.hipR.rotation.x = legB * hipAmp;
 
-    // Knees bend most during the SWING half of the cycle (leg going backward
-    // relative to body becomes "swing forward" via reversed sign on the back side).
-    // A real runner's knee tucks high on swing, stays nearly straight on stance.
-    const kneeSwingL = Math.max(0, -leg);  // 0..1 during L swing
+    // ----- Knees: deeper drive on shinobi, straighter on tiptoe -----
+    const kneeSwingL = Math.max(0, -leg);
     const kneeSwingR = Math.max(0, -legB);
-    j.kneeL.rotation.x = 0.15 + kneeSwingL * (1.25 + sp * 0.35);
-    j.kneeR.rotation.x = 0.15 + kneeSwingR * (1.25 + sp * 0.35);
+    const kneeAmp = lerp(1.25 + sp * 0.35, 1.55, shinobi) * (1 - tiptoe * 0.45);
+    j.kneeL.rotation.x = 0.15 + kneeSwingL * kneeAmp;
+    j.kneeR.rotation.x = 0.15 + kneeSwingR * kneeAmp;
 
-    // Ankles: heel-up at toe-off (just after foot peaks back), dorsiflex on swing.
-    if (j.footL) j.footL.rotation.x = -leg  * 0.45;
-    if (j.footR) j.footR.rotation.x = -legB * 0.45;
+    // ----- Ankles: dorsi/plantar pump normally, plantarflexed on tiptoe -----
+    const ankleNormalL = -leg  * 0.45;
+    const ankleNormalR = -legB * 0.45;
+    const ankleTipL    = -0.55 + Math.abs(leg)  * 0.20;  // toes pointed down throughout
+    const ankleTipR    = -0.55 + Math.abs(legB) * 0.20;
+    if (j.footL) j.footL.rotation.x = lerp(ankleNormalL, ankleTipL, tiptoe);
+    if (j.footR) j.footR.rotation.x = lerp(ankleNormalR, ankleTipR, tiptoe);
 
-    // Arms: tight bent-elbow swing, counter to legs. Elbows stay folded ~60°.
+    // ----- Arms: SHINOBI blend (straight back, palms facing camera) vs jog -----
+    // shoulder.x = -π/2 makes the arm point straight back relative to torso.
+    const SHIN_SHOULDER_X = -Math.PI * 0.5 + 0.05;
     const armAmp = 0.42;
-    j.shoulderL.rotation.x = -leg  * armAmp - 0.10;
-    j.shoulderR.rotation.x = -legB * armAmp - 0.10;
-    // Subtle inward/outward arm carry, gives the slight cross-body swing.
-    j.shoulderL.rotation.z =  0.10 + leg  * 0.05;
-    j.shoulderR.rotation.z = -0.10 + legB * 0.05;
-    const elbowBase = -1.05;
-    j.elbowL.rotation.x = elbowBase + leg  * 0.15;
-    j.elbowR.rotation.x = elbowBase + legB * 0.15;
+    const jogShoulderXL = -leg  * armAmp - 0.10;
+    const jogShoulderXR = -legB * armAmp - 0.10;
+    // Even on the shinobi pose, a tiny stride-sync wobble keeps it from feeling frozen.
+    const shinJitterL = leg  * 0.06;
+    const shinJitterR = legB * 0.06;
+    j.shoulderL.rotation.x = lerp(jogShoulderXL, SHIN_SHOULDER_X + shinJitterL, shinobi);
+    j.shoulderR.rotation.x = lerp(jogShoulderXR, SHIN_SHOULDER_X + shinJitterR, shinobi);
+    // Spread the arms slightly so they don't intersect the back; palms outward.
+    j.shoulderL.rotation.z = lerp(0.10 + leg  * 0.05,  0.18, shinobi);
+    j.shoulderR.rotation.z = lerp(-0.10 + legB * 0.05, -0.18, shinobi);
+    // Slight inward sweep so the trailing arms form the classic shinobi "fin".
+    j.shoulderL.rotation.y = lerp(0,  0.20, shinobi);
+    j.shoulderR.rotation.y = lerp(0, -0.20, shinobi);
+    // Elbows: bent in jog, fully straight in shinobi.
+    const elbowJog = -1.05;
+    j.elbowL.rotation.x = lerp(elbowJog + leg  * 0.15, -0.05, shinobi);
+    j.elbowR.rotation.x = lerp(elbowJog + legB * 0.15, -0.05, shinobi);
+    // Wrists: flex slightly so palms face camera (back of body) in shinobi pose.
+    if (j.handL) j.handL.rotation.x = lerp(0, -0.30, shinobi);
+    if (j.handR) j.handR.rotation.x = lerp(0, -0.30, shinobi);
 
-    // Pelvis: small vertical bob at 2x stride freq, contralateral drop, twist.
-    j.pelvis.position.y = 1.05 + Math.abs(Math.cos(phase * 2)) * 0.032;
-    j.pelvis.rotation.y =  leg          * 0.15;   // twist opposite shoulders
-    j.pelvis.rotation.z =  Math.cos(phase) * 0.045; // hip drop
+    // ----- Pelvis: lower with shinobi, smaller bob on tiptoe -----
+    const bobNormal  = Math.abs(Math.cos(phase * 2)) * 0.032;
+    const bobShinobi = Math.abs(Math.cos(phase * 2)) * 0.020;
+    const bobTiptoe  = Math.abs(Math.cos(phase * 2)) * 0.018;
+    const bob = bobNormal * normalcy + bobShinobi * shinobi + bobTiptoe * tiptoe;
+    j.pelvis.position.y = 1.05 + bob - shinobi * 0.30;   // <-- "slowly lowering"
+    j.pelvis.rotation.y = leg * 0.15 * (1 - shinobi * 0.5) * (1 - tiptoe * 0.6);
+    j.pelvis.rotation.z = Math.cos(phase) * 0.045 * (1 - tiptoe * 0.5);
 
-    // Torso: lean forward with speed, counter-rotates against pelvis, gentle sway.
-    j.torso.rotation.x = -0.12 - sp * 0.10;
-    j.torso.rotation.y = -leg * 0.10;
-    j.torso.rotation.z = Math.sin(phase * 2) * 0.018;
+    // ----- Torso: dramatic forward lean in shinobi, upright on tiptoe -----
+    const torsoNormal  = -0.12 - sp * 0.10;
+    const torsoShinobi = -1.05;                          // close to horizontal
+    const torsoTiptoe  = -0.04;                          // upright
+    j.torso.rotation.x = torsoNormal * normalcy + torsoShinobi * shinobi + torsoTiptoe * tiptoe;
+    j.torso.rotation.y = -leg * 0.10 * (1 - shinobi * 0.7) * (1 - tiptoe * 0.5);
+    j.torso.rotation.z = Math.sin(phase * 2) * 0.018 * (1 - shinobi * 0.5);
 
-    // Head: slight forward tilt, tracks pelvis subtly.
-    j.head.rotation.x = 0.04;
-    j.head.rotation.y = Math.sin(phase) * 0.05;
+    // ----- Head: compensate forward torso lean so eyes stay on horizon -----
+    const headNormal  = 0.04;
+    const headShinobi = 0.95;   // pitched up RELATIVE TO TORSO -> level in WORLD
+    const headTiptoe  = -0.02;
+    j.head.rotation.x = headNormal * normalcy + headShinobi * shinobi + headTiptoe * tiptoe;
+    j.head.rotation.y = Math.sin(phase) * 0.05 * (1 - shinobi) * (1 - tiptoe * 0.5);
   } else if (info.state === 'jump') {
     // Posture driven by vertical velocity sign/magnitude.
     const vy = info.velY ?? 0;
@@ -1485,7 +1527,10 @@ let camLastX = 0, camLastY = 0;
 canvas.addEventListener('touchstart', (e) => {
   if (camTouchId !== null) return;
   const t = e.changedTouches[0];
-  // Ignore if it begins inside an interactive UI element
+  // Camera drag is restricted to the RIGHT half of the screen so it can't
+  // be triggered while the user is operating the joystick on the left.
+  if (t.clientX < window.innerWidth * 0.5) return;
+  // Ignore if it begins inside an interactive UI element.
   const el = document.elementFromPoint(t.clientX, t.clientY);
   if (el && el.closest('#joystick, #action-buttons, #start-prompt')) return;
   camTouchId = t.identifier;
@@ -1724,6 +1769,25 @@ function gameStep(dt) {
     }
     player.speed = hSpeed;
 
+    // Body-relative velocity decomposition (forward / side). Drives the
+    // shinobi posture (forward only) and the tip-toe foot style (side/back).
+    {
+      const fx = Math.sin(player.facing),  fz = Math.cos(player.facing);   // body forward
+      const rx = Math.cos(player.facing),  rz = -Math.sin(player.facing);  // body right
+      if (hSpeed > 0.1) {
+        player.moveForward = (player.vel.x * fx + player.vel.z * fz) / hSpeed;
+        player.moveSide    = (player.vel.x * rx + player.vel.z * rz) / hSpeed;
+      } else {
+        player.moveForward = 1; player.moveSide = 0;
+      }
+      // Shinobi factor: ramps in as forward speed climbs from walk -> sprint.
+      // Damped so the body "slowly lowers" rather than snapping.
+      const fwdAmt = Math.max(0, player.moveForward);
+      const sp01   = Math.min(1, hSpeed / baseRun);
+      const targetShinobi = THREE.MathUtils.smoothstep(sp01, 0.55, 1.0) * fwdAmt;
+      player.shinobi = THREE.MathUtils.damp(player.shinobi, targetShinobi, 2.5, dt);
+    }
+
     // ---- State transitions ----
     player.stateTime += dt;
     player.iframes = Math.max(0, player.iframes - dt);
@@ -1880,6 +1944,9 @@ function gameStep(dt) {
       attackProgress: Math.min(1, player.stateTime / curHitDur),
       slideProgress:  Math.min(1, player.stateTime / 0.72),
       velY: player.vel.y,
+      shinobi:     player.shinobi,
+      moveForward: player.moveForward,
+      moveSide:    player.moveSide,
     };
     if (player.state === 'idle' && player.speed > 0.4) aniInfo.state = 'run';
     animateCharacter(playerChar, aniInfo, dt);
