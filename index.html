@@ -1487,10 +1487,14 @@ function updateJoy(t) {
   const ndx = (len > 0 ? dx / len : 0) * clamped;
   const ndy = (len > 0 ? dy / len : 0) * clamped;
   stick.style.transform = `translate(calc(-50% + ${ndx}px), calc(-50% + ${ndy}px))`;
-  input.moveX = (len > 0 ? dx / len : 0) * (clamped / JOY_RADIUS);
-  input.moveY = (len > 0 ? dy / len : 0) * (clamped / JOY_RADIUS);
-  // Auto-sprint when stick pushed near edge
-  input.sprint = clamped > JOY_RADIUS * 0.92 || _btnSprintHeld;
+  // Sqrt response curve so even small joystick deflections produce near-full
+  // axis magnitude — joystick reads as "high sensitivity".
+  const norm = clamped / JOY_RADIUS;
+  const mag = Math.sqrt(norm);
+  input.moveX = (len > 0 ? dx / len : 0) * mag;
+  input.moveY = (len > 0 ? dy / len : 0) * mag;
+  // Auto-sprint kicks in earlier (60% deflection vs the old 92%).
+  input.sprint = clamped > JOY_RADIUS * 0.60 || _btnSprintHeld;
 }
 
 window.addEventListener('touchmove', (e) => {
@@ -1499,8 +1503,8 @@ window.addEventListener('touchmove', (e) => {
       updateJoy(t);
       e.preventDefault();
     } else if (t.identifier === camTouchId) {
-      input.lookDX += (t.clientX - camLastX) * 1.4;
-      input.lookDY += (t.clientY - camLastY) * 1.4;
+      input.lookDX += (t.clientX - camLastX) * 2.2;
+      input.lookDY += (t.clientY - camLastY) * 2.2;
       camLastX = t.clientX;
       camLastY = t.clientY;
       e.preventDefault();
@@ -1666,7 +1670,8 @@ function gameStep(dt) {
   // ---- Camera rotation from mouse/touch deltas ----
   // Horizontal is INVERTED on request: drag mouse/finger right -> view rotates LEFT.
   // Drag mouse/finger down -> view tilts down (pitch decreases -> camera higher above target).
-  const sens = isTouch ? 0.0045 : 0.0022;
+  // Cranked up significantly: ~2.5x previous on mouse, ~2.5x previous on touch.
+  const sens = isTouch ? 0.0115 : 0.0058;
   cam.yaw   -= input.lookDX * sens;
   cam.pitch -= input.lookDY * sens;
   cam.pitch = Math.max(-1.05, Math.min(0.7, cam.pitch));
@@ -1706,7 +1711,7 @@ function gameStep(dt) {
 
     // Accel toward target
     if (allowMove || inAir) {
-      const accel = inAir ? 8 : 22;
+      const accel = inAir ? 8 : 34;
       const wishNX = wishLen > 0 ? wishX / wishLen : 0;
       const wishNZ = wishLen > 0 ? wishZ / wishLen : 0;
       const desired = new THREE.Vector3(wishNX * targetSpeed, 0, wishNZ * targetSpeed);
@@ -1894,13 +1899,11 @@ function gameStep(dt) {
       player.stateTime = 0;
     }
 
-    // Stamina regen when not actively spending.
-    const sprinting = (player.state === 'run' && canSprint && hSpeed > baseWalk + 0.3);
-    const spending = sprinting || player.state === 'attack' || player.state === 'slide';
-    if (!spending) {
+    // Stamina regenerates whenever the player is not executing a one-shot
+    // spending action (attack / slide / jump pay up-front). Walking AND
+    // sprinting are both free.
+    if (player.state !== 'attack' && player.state !== 'slide') {
       player.stam = Math.min(player.stamMax, player.stam + dt * 28);
-    } else if (sprinting) {
-      player.stam = Math.max(0, player.stam - dt * 14);
     }
 
     // Apply transform
