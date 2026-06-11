@@ -152,6 +152,7 @@ except Exception:
     VOICE_ENABLED = False
 
 def speak(text):
+    """Prints a Nexus-G message and voices it when TTS is available."""
     print(f"\n[Nexus-G]: {text}")
     if VOICE_ENABLED:
         try:
@@ -161,6 +162,7 @@ def speak(text):
             pass
 
 def listen_command():
+    """Captures the next user command by microphone, falling back to text input."""
     if not VOICE_ENABLED:
         return input("\n[Text Mode] Command the AI: ")
 
@@ -209,9 +211,11 @@ DEFAULT_STATE = {
 }
 
 def _fresh_state():
+    """Returns a deep copy of the default build state."""
     return json.loads(json.dumps(DEFAULT_STATE))
 
 def load_state():
+    """Loads the persisted build state, merged over defaults for forward compatibility."""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
@@ -224,6 +228,7 @@ def load_state():
     return _fresh_state()
 
 def save_state(state):
+    """Persists the build state to nexus_workspace/state.json."""
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
 
@@ -414,10 +419,14 @@ CONTINUE_INSTRUCTION = (
 # 5. SERVER & HYBRID GENERATION UTILS
 # ==========================================
 class TelemetryHandler(SimpleHTTPRequestHandler):
+    """Serves the generated game from nexus_workspace and accepts FPS telemetry POSTs."""
+
     def __init__(self, *args, **kwargs):
+        """Anchors the file server to the workspace directory."""
         super().__init__(*args, directory=WORKSPACE_DIR, **kwargs)
 
     def end_headers(self):
+        """Adds no-cache and CORS headers so edits show up on refresh."""
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
@@ -425,6 +434,7 @@ class TelemetryHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_POST(self):
+        """Receives {"fps": ...} telemetry beacons from the running game."""
         global latest_telemetry
         if urlparse(self.path).path == "/telemetry":
             try:
@@ -436,6 +446,7 @@ class TelemetryHandler(SimpleHTTPRequestHandler):
             self.wfile.write(b'{"status": "ok"}')
 
 def serve_game():
+    """Runs the threaded preview web server for the generated game on port 8080."""
     server_address = ("0.0.0.0", 8080)
     try:
         with ThreadingHTTPServer(server_address, TelemetryHandler) as httpd:
@@ -769,6 +780,7 @@ def parse_file_blocks(text):
         return None, {}
 
     def _first_line(s):
+        """Returns the first non-blank-trimmed line of a response."""
         return s.split("\n", 1)[0].strip()
 
     if _first_line(stripped).startswith("APPROVED"):
@@ -877,6 +889,11 @@ def accept_candidate(fname, old_code, new_code):
 # 8. NVIDIA OMNIVERSE ASSET FETCH
 # ==========================================
 def fetch_nvidia_usd_asset(prompt, output_path, max_retries=4):
+    """Fetches NVIDIA Omniverse USD search metadata for an asset prompt.
+
+    Writes placeholder stubs when offline or unauthorized; generated games
+    never load these files (the runtime contract keeps all visuals procedural).
+    """
     if not is_connected():
         speak("Offline Mode Active. Creating placeholder USD asset instead of calling NVIDIA Omniverse.")
         with open(output_path, 'w') as f: f.write("DUMMY_OFFLINE_ASSET")
@@ -1013,6 +1030,7 @@ def plan_project(state):
     return True
 
 def fetch_assets(state):
+    """Fetches any not-yet-completed plan assets, checkpointing progress in state."""
     for asset in state["plan"].get("assets_needed", []):
         if not isinstance(asset, dict):
             continue
@@ -1331,6 +1349,12 @@ def run_update(state, user_prompt):
     speak("The change response could not be applied safely, so the build was left untouched.")
 
 def run_nexus_g(user_prompt):
+    """Routes a user command: build a new game, stack a change, resume, or start fresh.
+
+    The first description builds a game in nexus_workspace/. Every later
+    instruction stacks adjustments onto that build; explicit fresh-start
+    commands ('new game <idea>') archive the old build and plan a new one.
+    """
     state = load_state()
     command = user_prompt.strip()
     if not command:
