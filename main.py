@@ -228,9 +228,13 @@ def load_state():
     return _fresh_state()
 
 def save_state(state):
-    """Persists the build state to nexus_workspace/state.json."""
-    with open(STATE_FILE, 'w') as f:
+    """Persists the build state atomically so a crash can never truncate it."""
+    tmp_path = f"{STATE_FILE}.tmp"
+    with open(tmp_path, 'w') as f:
         json.dump(state, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, STATE_FILE)
 
 # ==========================================
 # 4. SYSTEM PROMPTS (Claude-Code-style agentic quality pipeline)
@@ -436,14 +440,33 @@ class TelemetryHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         """Receives {"fps": ...} telemetry beacons from the running game."""
         global latest_telemetry
-        if urlparse(self.path).path == "/telemetry":
-            try:
-                data = json.loads(self.rfile.read(int(self.headers['Content-Length'])).decode('utf-8'))
-                latest_telemetry["fps"] = data.get("fps", 0)
-            except: pass
-            self.send_response(200)
+        if urlparse(self.path).path != "/telemetry":
+            self.send_response(404)
             self.end_headers()
-            self.wfile.write(b'{"status": "ok"}')
+            return
+
+        # Telemetry beacons are tiny; reject anything oversized or malformed.
+        max_body = 4096
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            content_length = 0
+        if content_length <= 0 or content_length > max_body:
+            self.send_response(413)
+            self.end_headers()
+            return
+
+        try:
+            data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+            latest_telemetry["fps"] = data.get("fps", 0)
+        except (UnicodeDecodeError, ValueError, AttributeError):
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"status": "ok"}')
 
 def serve_game():
     """Runs the threaded preview web server for the generated game on port 8080."""
@@ -754,13 +777,21 @@ def parse_plan(raw, allow_repair=True):
         files.append({"filename": fname, "description": str(f.get("description", "")).strip()})
     if not files:
         return None
-    if "index.html" not in seen:
+    files = files[:MAX_PLAN_FILES]
+    present = {f["filename"] for f in files}
+    if "index.html" not in present:
         files.insert(0, {
             "filename": "index.html",
             "description": ("HTML shell: viewport meta; three.js r128 CDN script tag, then the game script tag(s); "
                             "HUD and touch-control elements exactly as referenced by the game code.")
         })
-    plan["files"] = files[:MAX_PLAN_FILES]
+    if "game.js" not in present:
+        files.append({
+            "filename": "game.js",
+            "description": ("Core game runtime: scene/camera/renderer setup, keyboard+mouse and touch input, "
+                            "delta-time game loop and state transitions, HUD updates, telemetry POST.")
+        })
+    plan["files"] = files
     if not isinstance(plan.get("assets_needed"), list):
         plan["assets_needed"] = []
     if not isinstance(plan.get("advanced_mechanics"), list):
@@ -928,7 +959,8 @@ def fetch_nvidia_usd_asset(prompt, output_path, max_retries=4):
                         cutoff_threshold = '1.05',
                         limit = '50'
                     )
-                )
+                ),
+                timeout=(5, 30)
             )
 
             response.raise_for_status()
@@ -1316,6 +1348,9 @@ def run_update(state, user_prompt):
         return
 
     verdict, blocks = parse_file_blocks(raw)
+    if verdict in ("no_changes", "approved"):
+        speak("The model judged that no file changes were needed for that request.")
+        return
     if blocks:
         changed = apply_file_blocks(state, blocks, allow_new=True, max_new=3)
         if changed:
