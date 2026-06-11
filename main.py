@@ -35,11 +35,14 @@ logging.info("Nexus-G System Initialized.")
 print("[System] Nexus-G Initializing...")
 
 # --- MAIN ONLINE MODEL (NVIDIA API Catalog) ---
-# Qwen3 Coder 480B A35B Instruct: a 480B-parameter MoE coding model with a
-# 262,144-token context window, hosted on the SAME NVIDIA endpoint as before,
-# so the existing API key keeps working with no key switching.
-NVIDIA_MODEL = "qwen/qwen3-coder-480b-a35b-instruct"
-MODEL_DISPLAY = "Qwen3 Coder 480B A35B (NVIDIA)"
+# Qwen3.5 397B A17B: a 397B-parameter MoE model (17B active) with a
+# 262,144-token context window and state-of-the-art agentic coding skill,
+# hosted on the SAME NVIDIA endpoint as before, so the existing API key keeps
+# working with no key switching. It is a THINKING model: it reasons inside
+# <think>...</think> before answering; the pipeline streams that reasoning to
+# the console live and strips it from everything that gets parsed or saved.
+NVIDIA_MODEL = "qwen/qwen3.5-397b-a17b"
+MODEL_DISPLAY = "Qwen3.5 397B A17B (NVIDIA)"
 
 # --- QUALITY PIPELINE TUNING ---
 # "max"  = full agentic pipeline: plan -> code -> verify -> self-review -> integration review
@@ -55,18 +58,19 @@ CONTEXT_BUDGET_OFFLINE = 6_000    # chars of project context per request (offlin
 PER_FILE_CONTEXT_CAP = 30_000     # chars of any single file included as context
 MIN_CALL_GAP_SECONDS = 1.5      # global throttle between API calls (rate-limit friendly)
 
-# Per-role sampling parameters. Code generation uses Qwen3-Coder's officially
-# recommended settings (temperature 0.7 / top_p 0.8); verification roles run
-# colder for conservative, repeatable judgements. Temperatures never go below
-# 0.1 because near-greedy decoding makes Qwen3 models loop.
+# Per-role sampling parameters. Qwen3.5 runs in thinking mode, and its
+# official recommendation for thinking-mode coding is temperature 0.6 /
+# top_p 0.95 for every role — running it colder causes repetition and
+# degeneration. max_tokens is sized so the private reasoning never crowds
+# out the actual answer that follows it.
 ROLE_PARAMS = {
-    "planner":     {"temperature": 0.30, "top_p": 0.8, "max_tokens": 4096},
-    "coder":       {"temperature": 0.70, "top_p": 0.8, "max_tokens": 8192},
-    "fixer":       {"temperature": 0.30, "top_p": 0.8, "max_tokens": 8192},
-    "reviewer":    {"temperature": 0.25, "top_p": 0.8, "max_tokens": 8192},
-    "integration": {"temperature": 0.30, "top_p": 0.8, "max_tokens": 8192},
-    "update":      {"temperature": 0.50, "top_p": 0.8, "max_tokens": 8192},
-    "json_repair": {"temperature": 0.10, "top_p": 0.8, "max_tokens": 4096},
+    "planner":     {"temperature": 0.6, "top_p": 0.95, "max_tokens": 8192},
+    "coder":       {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
+    "fixer":       {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
+    "reviewer":    {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
+    "integration": {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
+    "update":      {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
+    "json_repair": {"temperature": 0.6, "top_p": 0.95, "max_tokens": 8192},
 }
 
 # ==========================================
@@ -288,8 +292,10 @@ DESIGN RULES:
 4. "advanced_mechanics": 3-6 concrete mechanics implementable with procedural geometry, ALWAYS including both "Touch joystick + buttons (mobile)" and "Keyboard + mouse (PC)".
 5. Never plan anything that needs a build tool, server-side code, module syntax, or external assets.
 
+THINKING: Reason as deeply as you need inside your private thinking section first (game design, interfaces, risks). Everything AFTER your thinking must be ONLY the JSON object.
+
 CRITICAL OUTPUT RULES:
-1. Output ONLY one valid JSON object. Your first character MUST be { and your last character MUST be }.
+1. After your thinking, output ONLY one valid JSON object. Its first character MUST be { and its last character MUST be }.
 2. No conversational text, no explanations, no markdown fences.
 
 EXPECTED JSON SHAPE:
@@ -319,9 +325,11 @@ BEFORE YOU EMIT, SILENTLY SELF-CHECK:
 - Is every visual procedural (no asset/file/URL loads beyond the pinned three.js tag)?
 - Is the file COMPLETE (no truncation, no placeholders)?
 
+THINKING: Use your private thinking section to architect the file (structures, edge cases, both input schemes) as deeply as you need. Everything AFTER your thinking must be ONLY the raw file.
+
 CRITICAL OUTPUT RULES:
-1. Output ONLY the raw content of the requested file.
-2. Your FIRST character is the first character of the file (for example `<` for HTML).
+1. After your thinking, output ONLY the raw content of the requested file.
+2. The first character after your thinking is the first character of the file (for example `<` for HTML).
 3. NO conversational text, NO explanations, NO markdown fences.""".replace("__TECH_SPEC__", TECH_SPEC)
 
 FIXER_PROMPT = """You are the Nexus-G Debug Surgeon. You receive ONE file and ONE concrete error or validation report. Fix it with the minimum change necessary.
@@ -332,8 +340,10 @@ RULES:
 3. The corrected file must satisfy this contract:
 __TECH_SPEC__
 
+THINKING: Diagnose the error in your private thinking section first. Everything AFTER your thinking must be ONLY the corrected file.
+
 CRITICAL OUTPUT RULES:
-1. Output the COMPLETE corrected file — every line, top to bottom.
+1. After your thinking, output the COMPLETE corrected file — every line, top to bottom.
 2. Raw content only: no commentary, no markdown fences.""".replace("__TECH_SPEC__", TECH_SPEC)
 
 REVIEWER_PROMPT = """You are the Nexus-G Adversarial Reviewer — a hostile senior engineer paid to find what is genuinely BROKEN. You receive one file under review (plus sibling project files for cross-reference). Hunt ONLY for real defects:
@@ -344,8 +354,10 @@ REVIEWER_PROMPT = """You are the Nexus-G Adversarial Reviewer — a hostile seni
 
 __TECH_SPEC__
 
+THINKING: Trace the code path by path in your private thinking section as deeply as you need. Everything AFTER your thinking must be ONLY your verdict per the protocol below.
+
 DECISION PROTOCOL (follow exactly):
-- If the file would ship as-is (no genuine defects), reply with EXACTLY this single line and nothing else:
+- If the file would ship as-is (no genuine defects), reply after your thinking with EXACTLY this single line and nothing else:
 APPROVED
 - Otherwise reply with the COMPLETE corrected file: raw content only, no commentary, no markdown fences, no diff — the whole file.
 
@@ -360,8 +372,10 @@ INTEGRATION_PROMPT = """You are the Nexus-G Release Integrator. You receive ALL 
 
 __TECH_SPEC__
 
+THINKING: Cross-check every contract in your private thinking section first. Everything AFTER your thinking must be ONLY your verdict per the protocol below.
+
 DECISION PROTOCOL (follow exactly):
-- If the build is coherent and shippable, reply with EXACTLY this single line and nothing else:
+- If the build is coherent and shippable, reply after your thinking with EXACTLY this single line and nothing else:
 NO_CHANGES_NEEDED
 - Otherwise return ONLY the files that must change (complete content for each) using the protocol below. Do NOT invent new files. Do NOT restyle working code — minimal cross-file repairs only.
 
@@ -375,6 +389,7 @@ UPDATE_PROMPT = """You are the Nexus-G Live-Ops Engineer. You receive a working 
 __TECH_SPEC__
 
 OUTPUT:
+- Plan the change in your private thinking section first; everything AFTER your thinking must be ONLY the file blocks.
 - Return ONLY the files you changed (complete content for each), via the protocol below.
 - You may add at most 2 NEW files if the request truly requires them (and you must wire them into index.html in the same response).
 - No commentary outside the blocks.
@@ -384,13 +399,14 @@ __FILE_BLOCK_SPEC__""".replace("__TECH_SPEC__", TECH_SPEC).replace("__FILE_BLOCK
 JSON_REPAIR_PROMPT = """You are a strict JSON repair machine. The user gives you text that was MEANT to be one valid JSON object but is malformed (stray prose, markdown fences, bad quotes/commas, truncation). Reconstruct the intended object, preserving all of its content.
 
 OUTPUT RULES:
-1. Output ONLY the corrected JSON object. First character {, last character }.
+1. After any private thinking, output ONLY the corrected JSON object. First character {, last character }.
 2. No fences, no commentary."""
 
 CONTINUE_INSTRUCTION = (
     "Your previous message hit the length limit mid-output. Continue EXACTLY where you stopped, "
     "starting with the very next character of the file. Do not repeat any earlier text, do not "
-    "summarize, and do not add any preamble or markdown fences."
+    "summarize, do not add any preamble or markdown fences, and do not open a new <think> block — "
+    "continue the raw output directly."
 )
 
 # ==========================================
@@ -466,10 +482,16 @@ def _stream_chat_once(messages, params, max_retries=5):
             for chunk in completion:
                 if chunk.choices:
                     choice = chunk.choices[0]
-                    if choice.delta and choice.delta.content is not None:
-                        content = choice.delta.content
-                        print(content, end="", flush=True)
-                        full_response += content
+                    if choice.delta:
+                        # Some deployments stream the model's private reasoning in a
+                        # separate field: show it live, but never keep it in the answer.
+                        reasoning = getattr(choice.delta, "reasoning_content", None)
+                        if reasoning:
+                            print(reasoning, end="", flush=True)
+                        if choice.delta.content is not None:
+                            content = choice.delta.content
+                            print(content, end="", flush=True)
+                            full_response += content
                     if choice.finish_reason:
                         finish_reason = choice.finish_reason
             print()
@@ -521,10 +543,12 @@ def dedup_overlap(accumulated, new_chunk, window=200, min_overlap=20):
     return new_chunk
 
 def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_retries=5, allow_continuation=True):
-    """Asks the active model (online Qwen3 Coder 480B, or local fallback) for a response.
+    """Asks the active model (online Qwen3.5 397B A17B, or local fallback) for a response.
 
     Online responses that hit the token limit are automatically continued and
-    stitched, so long files are never silently truncated. Returns "" on failure.
+    stitched, so long files are never silently truncated. The model's private
+    <think> reasoning streams to the console but is stripped from the returned
+    text. Returns "" on failure.
     """
     online = is_connected()
     params = ROLE_PARAMS.get(role, ROLE_PARAMS["coder"])
@@ -548,7 +572,7 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
             segment, finish_reason = _stream_chat_once(convo, params, max_retries=max_retries)
             if not segment:
                 # Total failure on the first call, or a dead continuation: keep what we have.
-                return accumulated
+                return strip_reasoning(accumulated)
             if accumulated:
                 segment = re.sub(r'^\s*```[a-zA-Z0-9]*\n', '', segment)
                 head = segment[:80].strip()
@@ -569,7 +593,8 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
                 {"role": "assistant", "content": accumulated},
                 {"role": "user", "content": CONTINUE_INSTRUCTION},
             ]
-        return accumulated
+        # Continuations stitched on the raw text; reasoning is removed only at the end.
+        return strip_reasoning(accumulated)
 
     elif local_llm:
         print(f"\n[Using Native Local Engine - Offline Mode (Direct Memory 120B)]")
@@ -596,7 +621,7 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
                         print(content, end="", flush=True)
                         full_response += content
             print()
-            return full_response
+            return strip_reasoning(full_response)
         except Exception as e:
             logging.error(f"Error communicating with local AI: {e}")
             print(f"\n[Error communicating with local AI]: {e}")
@@ -610,6 +635,27 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
 # ==========================================
 # 7. PARSING & VALIDATION UTILITIES
 # ==========================================
+def strip_reasoning(text):
+    """Removes the model's private <think>...</think> reasoning from a response.
+
+    Balanced blocks are removed wherever they appear. If the output was cut
+    off inside an unterminated <think> block, everything from that tag onward
+    is reasoning and is dropped. If a stray closing tag remains (the opening
+    tag was streamed as a separate reasoning field), everything before it is
+    reasoning and is dropped.
+    """
+    text = text or ""
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    lowered = text.lower()
+    open_pos = lowered.rfind('<think>')
+    if open_pos != -1:
+        text = text[:open_pos]
+        lowered = lowered[:open_pos]
+    close_pos = lowered.rfind('</think>')
+    if close_pos != -1:
+        text = text[close_pos + len('</think>'):]
+    return text.strip()
+
 def clean_code(text):
     """Extracts raw code/JSON from a model response without mangling code that merely CONTAINS fences."""
     text = (text or "").strip()
