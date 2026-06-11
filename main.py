@@ -383,6 +383,7 @@ __FILE_BLOCK_SPEC__""".replace("__TECH_SPEC__", TECH_SPEC).replace("__FILE_BLOCK
 
 UPDATE_PROMPT = """You are the Nexus-G Live-Ops Engineer. You receive a working game's full file set plus ONE change request. Apply the request the way a careful senior engineer edits production code:
 
+- The CURRENT BUILD files are the live truth. Build on top of them: changes accumulate across requests. NEVER regenerate the game from scratch and NEVER drop features the request does not name.
 - Preserve ALL existing behavior not named by the request.
 - Keep every existing public name (functions, globals, element IDs) stable unless the request requires renaming.
 - Changed files must remain complete and satisfy the runtime contract:
@@ -1182,9 +1183,86 @@ def integration_review(state):
     state["integration_done"] = True
     save_state(state)
 
+# --- Build stacking helpers -------------------------------------------------
+# A first description builds a game; every later instruction STACKS onto the
+# living build instead of recreating a different game. Starting over is the
+# explicit exception, and the previous game is archived rather than destroyed.
+FRESH_START_KEYWORDS = ("new game", "new project", "start over", "from scratch", "reset")
+FRESH_START_PREFIXES = ("new game", "new project")
+
+def _fresh_start_request(user_prompt):
+    """Detects an explicit fresh-start command.
+
+    Returns the new game description for "new game <idea>" style commands,
+    "" for a bare fresh-start keyword, or None when this is NOT a fresh start
+    (so phrases like "reset the score when falling" still stack as changes).
+    """
+    command = user_prompt.strip()
+    lowered = command.lower()
+    if lowered in FRESH_START_KEYWORDS:
+        return ""
+    for prefix in FRESH_START_PREFIXES:
+        if lowered.startswith(prefix + " ") or lowered.startswith(prefix + ":"):
+            return command[len(prefix):].lstrip(" :,-")
+    return None
+
+def _known_build_files(state):
+    """Every filename the current build could own, in stable order."""
+    fnames = []
+    for f in (state.get("plan") or {}).get("files", []):
+        if isinstance(f, dict) and f.get("filename"):
+            fnames.append(f["filename"])
+    fnames += state.get("completed_files", [])
+    fnames += ["index.html", "game.js", "style.css"]
+    seen = set()
+    ordered = []
+    for fname in fnames:
+        if fname and fname not in seen:
+            seen.add(fname)
+            ordered.append(fname)
+    return ordered
+
+def _has_existing_build(state):
+    """True when a generated game already lives in the workspace."""
+    return any(os.path.isfile(os.path.join(WORKSPACE_DIR, f)) for f in _known_build_files(state))
+
+def _archive_current_build(state):
+    """Moves the current build's files into nexus_workspace/archive/<timestamp>/
+    so starting a new game never destroys the previous one."""
+    to_move = [f for f in _known_build_files(state) if os.path.isfile(os.path.join(WORKSPACE_DIR, f))]
+    if not to_move:
+        return
+    archive_dir = os.path.join(WORKSPACE_DIR, "archive", str(int(time.time())))
+    os.makedirs(archive_dir, exist_ok=True)
+    for fname in to_move:
+        src = os.path.join(WORKSPACE_DIR, fname)
+        dst = os.path.join(archive_dir, fname.replace("/", "__"))
+        try:
+            os.replace(src, dst)
+        except OSError as e:
+            logging.warning(f"Could not archive {fname}: {e}")
+    speak(f"Archived the previous game ({len(to_move)} files) into archive/{os.path.basename(archive_dir)}.")
+    logging.info(f"Archived previous build files to {archive_dir}: {to_move}")
+
+def _register_new_plan_files(state, added_files, request):
+    """Folds files the model added during a stacked change into the plan, so
+    future context windows, updates and integration reviews treat them as
+    first-class project files."""
+    plan = state.get("plan")
+    if not isinstance(plan, dict) or not added_files:
+        return
+    files = plan.setdefault("files", [])
+    known = {f.get("filename") for f in files if isinstance(f, dict)}
+    for fname in added_files:
+        if fname in known or len(files) >= 12:
+            continue
+        snippet = " ".join(str(request).split())[:80]
+        files.append({"filename": fname, "description": f"Added by change request: {snippet}"})
+        known.add(fname)
+
 def run_update(state, user_prompt):
-    """Applies a change request against the WHOLE current build (not just game.js)."""
-    speak("Updating the existing build...")
+    """Stacks a change request onto the WHOLE current build (not just game.js)."""
+    speak("Stacking your change onto the current build...")
     plan_files = [f.get("filename") for f in (state.get("plan") or {}).get("files", [])]
     candidates = [fn for fn in plan_files if fn] + state.get("completed_files", []) + ["index.html", "game.js", "style.css"]
     current_files = {}
@@ -1223,11 +1301,19 @@ def run_update(state, user_prompt):
     if blocks:
         changed = apply_file_blocks(state, blocks, allow_new=True, max_new=3)
         if changed:
+            added = [f for f in changed if f not in current_files]
+            _register_new_plan_files(state, added, user_prompt)
             state.setdefault("history", []).append({"type": "update", "request": user_prompt, "changed": changed})
             save_state(state)
-            speak(f"Update complete — changed: {', '.join(changed)}. Refresh the preview!")
+            # A change that adds files or touches several at once gets one
+            # cross-file integration pass so the stack stays coherent.
+            if added or len(changed) >= 2:
+                state["integration_done"] = False
+                save_state(state)
+                integration_review(state)
+            speak(f"Change stacked onto the build — touched: {', '.join(changed)}. Refresh the preview!")
         else:
-            speak("The update produced no valid file changes, so the build was left untouched.")
+            speak("The change produced no valid file edits, so the build was left untouched.")
         return
 
     # Legacy fallback: a raw single-file response that validates as JS becomes game.js.
@@ -1239,23 +1325,39 @@ def run_update(state, user_prompt):
                 f.write(accepted)
             state.setdefault("history", []).append({"type": "update", "request": user_prompt, "changed": ["game.js"]})
             save_state(state)
-            speak("Update complete. Refresh the preview!")
+            speak("Change stacked onto game.js. Refresh the preview!")
             logging.info("Successfully updated game.js (legacy single-file path).")
             return
-    speak("The update response could not be applied safely, so the build was left untouched.")
+    speak("The change response could not be applied safely, so the build was left untouched.")
 
 def run_nexus_g(user_prompt):
     state = load_state()
-
-    if user_prompt.lower().startswith("update"):
-        run_update(state, user_prompt)
+    command = user_prompt.strip()
+    if not command:
         return
 
-    if user_prompt.lower() != "resume":
+    if command.lower().startswith("update"):
+        run_update(state, command)
+        return
+
+    fresh_request = _fresh_start_request(command)
+    if fresh_request is not None:
+        if not fresh_request:
+            speak("Tell me what new game to build — for example: 'new game a neon snake arena'.")
+            return
+        _archive_current_build(state)
+        command = fresh_request
+    elif command.lower() != "resume" and _has_existing_build(state):
+        # Default behavior: stack the instruction onto the existing build
+        # instead of recreating a whole different game in the workspace.
+        run_update(state, command)
+        return
+
+    if command.lower() != "resume":
         state = _fresh_state()
         state["status"] = "planning"
-        state["prompt"] = user_prompt
-        state["history"].append({"type": "build", "request": user_prompt})
+        state["prompt"] = command
+        state["history"].append({"type": "build", "request": command})
 
     if not state.get("plan"):
         if not plan_project(state):
@@ -1281,6 +1383,8 @@ def run_nexus_g(user_prompt):
 
 if __name__ == "__main__":
     print(f"[System] 🚀 Nexus-G online | Brain: {MODEL_DISPLAY} | Quality mode: {QUALITY_MODE.upper()}")
+    print("[System] Commands: describe a game to build it • any further instruction STACKS changes onto the current build")
+    print("[System]           'new game <idea>' starts fresh (previous build is archived) • 'resume' continues an interrupted build • 'exit' quits")
     threading.Thread(target=serve_game, daemon=True).start()
     while True:
         try:
