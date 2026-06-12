@@ -437,6 +437,14 @@ class TelemetryHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
 
+    def log_message(self, fmt, *args):
+        """Keeps HTTP access logs OFF the console so server traffic never
+        scrambles the command prompt; telemetry heartbeats are dropped and
+        other requests go to the activity log file instead."""
+        message = fmt % args
+        if "/telemetry" not in message:
+            logging.info(f"HTTP {self.address_string()} {message}")
+
     def do_POST(self):
         """Receives {"fps": ...} telemetry beacons from the running game."""
         global latest_telemetry
@@ -1445,6 +1453,7 @@ if __name__ == "__main__":
     print("[System] Commands: describe a game to build it • any further instruction STACKS changes onto the current build")
     print("[System]           'new game <idea>' starts fresh (previous build is archived) • 'resume' continues an interrupted build • 'exit' quits")
     threading.Thread(target=serve_game, daemon=True).start()
+    time.sleep(0.75)  # let the server print its startup line before the first prompt
     while True:
         try:
             cmd = listen_command()
