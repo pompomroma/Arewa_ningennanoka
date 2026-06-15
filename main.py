@@ -2,6 +2,7 @@ import os
 import json
 import time
 import random
+import queue
 import subprocess
 import requests
 import threading
@@ -10,6 +11,13 @@ import socket
 import logging
 from urllib.parse import urlparse
 import re
+
+# readline (when available) keeps the typed command line intact and editable
+# even if a background task prints to the console while you are typing.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    readline = None
 
 # ==========================================
 # 0. SETUP AND CONFIGURATION
@@ -48,6 +56,12 @@ MODEL_DISPLAY = "Qwen3.5 397B A17B (NVIDIA)"
 # "max"  = full agentic pipeline: plan -> code -> verify -> self-review -> integration review
 # "fast" = skip the self-review and integration passes (fewer API requests per build)
 QUALITY_MODE = os.environ.get("NEXUS_QUALITY", "max").strip().lower()
+
+# Stream raw model tokens to the console? OFF by default keeps the console calm
+# so the command prompt stays usable while a build runs — the AI no longer floods
+# the terminal with sentences as it writes. The full output is still saved to the
+# generated files and the activity log. Set NEXUS_STREAM=1 to watch it think live.
+CONSOLE_STREAM = os.environ.get("NEXUS_STREAM", "0").strip().lower() in ("1", "true", "yes", "on")
 
 MAX_CONTINUATIONS = 3           # auto-continue rounds when output hits the token limit
 MAX_FIX_ITERATIONS = 2          # surgical syntax-fix attempts per file
@@ -514,6 +528,8 @@ def _stream_chat_once(messages, params, max_retries=5):
         try:
             full_response = ""
             finish_reason = None
+            last_pulse = time.time()
+            pulsed = False
             completion = cloud_client.chat.completions.create(
                 model=NVIDIA_MODEL,
                 messages=messages,
@@ -527,17 +543,25 @@ def _stream_chat_once(messages, params, max_retries=5):
                     choice = chunk.choices[0]
                     if choice.delta:
                         # Some deployments stream the model's private reasoning in a
-                        # separate field: show it live, but never keep it in the answer.
+                        # separate field: show it live only in stream mode, never keep it.
                         reasoning = getattr(choice.delta, "reasoning_content", None)
-                        if reasoning:
+                        if reasoning and CONSOLE_STREAM:
                             print(reasoning, end="", flush=True)
                         if choice.delta.content is not None:
                             content = choice.delta.content
-                            print(content, end="", flush=True)
+                            if CONSOLE_STREAM:
+                                print(content, end="", flush=True)
                             full_response += content
                     if choice.finish_reason:
                         finish_reason = choice.finish_reason
-            print()
+                # Calm mode: a single dot every few seconds shows liveness without
+                # flooding the console (so you can keep typing the next command).
+                if not CONSOLE_STREAM and time.time() - last_pulse >= 4:
+                    last_pulse = time.time()
+                    pulsed = True
+                    print(".", end="", flush=True)
+            if CONSOLE_STREAM or pulsed:
+                print()
             return full_response, (finish_reason or "stop")
         except Exception as e:
             error_message = str(e).lower()
@@ -607,7 +631,11 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
         messages.append({"role": "user", "content": safe_user_prompt})
 
     if online and cloud_client:
-        print(f"\n[Using Cloud API - {MODEL_DISPLAY} | {NVIDIA_MODEL} | role={role}]")
+        status = f"[Cloud API - {MODEL_DISPLAY} | role={role}]"
+        if CONSOLE_STREAM:
+            print(f"\n{status}")
+        else:
+            logging.info(status)
         accumulated = ""
         convo = list(messages)
         continuations = 0
@@ -640,7 +668,11 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
         return strip_reasoning(accumulated)
 
     elif local_llm:
-        print(f"\n[Using Native Local Engine - Offline Mode (Direct Memory 120B)]")
+        status = "[Native Local Engine - Offline Mode (Direct Memory 120B)]"
+        if CONSOLE_STREAM:
+            print(f"\n{status}")
+        else:
+            logging.info(status)
         local_messages = []
         for m in messages:
             content = m["content"]
@@ -661,9 +693,11 @@ def ask_model(system_prompt, user_prompt=None, messages=None, role="coder", max_
                     delta = chunk['choices'][0].get('delta', {})
                     content = delta.get('content', '')
                     if content:
-                        print(content, end="", flush=True)
+                        if CONSOLE_STREAM:
+                            print(content, end="", flush=True)
                         full_response += content
-            print()
+            if CONSOLE_STREAM:
+                print()
             return strip_reasoning(full_response)
         except Exception as e:
             logging.error(f"Error communicating with local AI: {e}")
@@ -1448,11 +1482,43 @@ def run_nexus_g(user_prompt):
     speak("Build finished. Check your preview screen now!")
     logging.info("Build Finished successfully.")
 
+# ==========================================
+# 10. COMMAND QUEUE + BACKGROUND BUILD WORKER
+# ==========================================
+# Builds run on a worker thread so the input prompt on the main thread is NEVER
+# blocked while the AI is working. You can type the next adjustment at any time;
+# if a build is in progress it is queued and runs right after the current one.
+command_queue = queue.Queue()
+worker_busy = threading.Event()
+
+def build_worker():
+    """Processes queued commands one at a time on a background thread."""
+    while True:
+        cmd = command_queue.get()
+        if cmd is None:               # sentinel: shut the worker down
+            command_queue.task_done()
+            break
+        worker_busy.set()
+        try:
+            run_nexus_g(cmd)
+        except Exception as e:
+            logging.error(f"Build failed for command {cmd!r}: {e}")
+            speak(f"Something went wrong while working on that: {e}")
+        finally:
+            worker_busy.clear()
+            command_queue.task_done()
+        if command_queue.empty():
+            print("\n[Nexus-G] ✅ Ready — type your next game idea or adjustment.")
+
 if __name__ == "__main__":
     print(f"[System] 🚀 Nexus-G online | Brain: {MODEL_DISPLAY} | Quality mode: {QUALITY_MODE.upper()}")
     print("[System] Commands: describe a game to build it • any further instruction STACKS changes onto the current build")
     print("[System]           'new game <idea>' starts fresh (previous build is archived) • 'resume' continues an interrupted build • 'exit' quits")
+    print("[System] You can type a new request at ANY time — even while it is working; it will be queued and run next.")
+    if not CONSOLE_STREAM:
+        print("[System] (Console is in calm mode so you can type freely. Set NEXUS_STREAM=1 to watch the AI write live.)")
     threading.Thread(target=serve_game, daemon=True).start()
+    threading.Thread(target=build_worker, daemon=True).start()
     time.sleep(0.75)  # let the server print its startup line before the first prompt
     while True:
         try:
@@ -1462,8 +1528,14 @@ if __name__ == "__main__":
             logging.info("System manually exited via KeyboardInterrupt.")
             break
 
+        cmd = cmd.strip()
+        if not cmd:
+            continue
         if cmd.lower() in ['exit', 'stop', 'quit']:
             logging.info("System exited via user command.")
             break
 
-        run_nexus_g(cmd)
+        was_busy = worker_busy.is_set() or not command_queue.empty()
+        command_queue.put(cmd)
+        if was_busy:
+            speak("Got it — I'm busy right now, so I queued that. It runs as soon as the current task finishes.")
