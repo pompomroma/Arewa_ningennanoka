@@ -85,6 +85,8 @@ ROLE_PARAMS = {
     "integration": {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
     "update":      {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
     "json_repair": {"temperature": 0.6, "top_p": 0.95, "max_tokens": 8192},
+    "update_planner": {"temperature": 0.5, "top_p": 0.95, "max_tokens": 4096},
+    "deep_fixer":     {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
 }
 
 # ==========================================
@@ -255,34 +257,36 @@ def save_state(state):
 # ==========================================
 # TECH_SPEC is the single source of truth for runtime rules. It is injected
 # into every code-facing prompt so the rules can never drift between roles.
-TECH_SPEC = """RUNTIME CONTRACT — every generated file MUST satisfy ALL of these rules:
+# TECH_SPEC_BASE holds the mode-independent runtime contract. Per-render-style
+# recipes live in TECH_SPEC_ADDENDA and are composed in by tech_spec_for() so the
+# coder gets exactly the right high-detail recipe for 2D, HD-2D, or 3D.
+TECH_SPEC_BASE = """RUNTIME CONTRACT — every generated file MUST satisfy ALL of these rules:
 
 1. RENDERING STACK
 - Three.js r128 GLOBAL build only. index.html loads it EXACTLY as:
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   followed by plain <script src="game.js"></script> tags (never type="module").
 - `THREE` is a global object. FORBIDDEN in all .js files: `import`, `export`, top-level `await`.
-- FORBIDDEN: Three.js examples/jsm addons (OrbitControls, GLTFLoader, EffectComposer, ...) — they do not exist in the global bundle. Write your own small camera/control logic instead.
+- FORBIDDEN: Three.js examples/jsm addons (OrbitControls, GLTFLoader, EffectComposer, UnrealBloomPass, RenderPass, ShaderPass, any post-processing pass) — they do not exist in the global bundle. Write your own small camera/control/effect logic instead.
 
 2. ASSETS — PROCEDURAL-ONLY POLICY
-- Files under ./assets/ are text metadata stubs, NEVER loadable 3D models.
-- FORBIDDEN: loading .usd/.glb/.gltf/.obj/.fbx files, external images/textures/audio/fonts, or ANY network resource except the single Three.js CDN script tag above.
-- Build ALL visuals from procedural Three.js geometry (BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, PlaneGeometry, custom BufferGeometry), THREE.Group hierarchies, and MeshStandardMaterial/MeshPhongMaterial colors.
-- Runtime textures only via 2D canvas + THREE.CanvasTexture. Sound (optional) only via inline WebAudio synthesis.
+- Files under ./assets/ are text metadata stubs, NEVER loadable models.
+- FORBIDDEN: loading .usd/.glb/.gltf/.obj/.fbx files, external images/textures/audio/fonts, or ANY network resource except the single Three.js CDN script tag above and the ./telemetry POST.
+- Build ALL visuals procedurally per the RENDER STYLE recipe appended below. Runtime textures only via 2D canvas + THREE.CanvasTexture. Custom shaders only via inline GLSL written in JS template strings + THREE.ShaderMaterial (never import a shader). Sound (optional) only via inline WebAudio synthesis.
 - The game must boot and play perfectly with the assets directory empty.
 
 3. RESPONSIVE + DUAL INPUT (PC and mobile are BOTH first-class)
 - index.html has <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">.
-- The renderer canvas fills the window; on window resize update camera.aspect, call camera.updateProjectionMatrix(), and renderer.setSize(window.innerWidth, window.innerHeight).
+- The renderer canvas fills the window; on resize update the camera in use (perspective: set .aspect; orthographic: recompute left/right/top/bottom frustum bounds), call updateProjectionMatrix(), and renderer.setSize(window.innerWidth, window.innerHeight).
 - KEYBOARD+MOUSE: WASD/arrow keys move; space and/or mouse for the primary action.
 - TOUCH: a visible on-screen virtual joystick (left side) plus action button(s) (right side) using pointer/touch events, with CSS touch-action: none on control surfaces and preventDefault() to stop page scrolling.
 - Both input schemes drive the SAME movement/action functions.
 
-4. GAME LOOP AND FEEL
+4. GAME LOOP, HUD, STATES, QUALITY
 - requestAnimationFrame loop; delta time from THREE.Clock; ALL movement and timers scale by delta (frame-rate independent).
-- Lighting: at least one AmbientLight plus one DirectionalLight; renderer.shadowMap.enabled = true; key objects cast/receive shadows.
 - DOM HUD overlay: score/status plus a one-line controls hint.
 - Explicit game states: START SCREEN -> PLAYING -> GAME OVER -> RESTART. Restart fully resets the game WITHOUT reloading the page.
+- HIGH VISUAL QUALITY IS REQUIRED. Follow the RENDER STYLE recipe appended below for cameras, sprites/meshes, backgrounds, lighting, animation, and effects, and honor the build's ART DIRECTION (palette, mood, lighting, detail).
 
 5. TELEMETRY
 - Every 2 seconds: fetch('./telemetry', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ fps: measuredFps }) }).catch(function () {});
@@ -291,6 +295,44 @@ TECH_SPEC = """RUNTIME CONTRACT — every generated file MUST satisfy ALL of the
 6. COMPLETENESS BAR (non-negotiable)
 - Output COMPLETE, immediately runnable files: no placeholders, no TODOs, no "..." elisions, no "rest of the code unchanged" comments.
 - Zero console errors on load is the standard. Every referenced function/variable is defined; every element ID used in JS exists in the HTML; every file referenced by a tag exists in the plan."""
+
+TECH_SPEC_ADDENDA = {
+    "2d": """RENDER STYLE: 2D — crisp high-detail sprites with layered parallax. Build it with Three.js in an orthographic 2D setup:
+- CAMERA: THREE.OrthographicCamera mapping ~1 world unit to 1 logical pixel. On resize recompute left/right/top/bottom from the viewport (NOT .aspect), then updateProjectionMatrix(). renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)). Camera looks down -Z; layer objects on stepped Z planes.
+- SPRITES (procedural, high detail): define a reusable makeSpriteTexture(opts) that draws into an offscreen canvas in MULTIPLE layers — base silhouette, gradient body shading (createLinearGradient/createRadialGradient), 2-3 discrete cel-shade bands, a rim highlight on the lit edge, a core shadow on the unlit side, a MANDATORY dark outline stroke drawn last, and small detail accents — wrapped to a THREE.CanvasTexture (NearestFilter for pixel-art, LinearFilter for painterly). Use THREE.Sprite/SpriteMaterial for actors & pickups; textured PlaneGeometry + MeshBasicMaterial for tiles & parallax strips.
+- BACKGROUNDS: a full-screen gradient-sky quad behind everything, plus 3-5 parallax PlaneGeometry strips at increasing -Z (gradient/silhouette canvas textures) scrolled at fractional camera speed via material.map.offset or position. Optional THREE.Points starfield.
+- LIGHTING: unlit MeshBasic/Sprite materials are fine (no DirectionalLight needed). Ground shadows are FAUX — a soft dark ellipse sprite under each actor.
+- ANIMATION: spritesheet frames in one canvas grid; animate with texture.repeat.set(1/cols,1/rows) + stepping texture.offset on a Clock-delta accumulator; plus layered sprite-part transforms.
+- EFFECTS: additive glow sprites (AdditiveBlending, depthWrite:false), THREE.Points particles (AdditiveBlending, soft-circle CanvasTexture), screen shake, full-screen flash and radial vignette quads.""",
+
+    "hd2d": """RENDER STYLE: HD-2D — 2D sprites composited into a lit 3D world (the Octopath Traveler look):
+- CAMERA: THREE.PerspectiveCamera, low fov ~35-45, raised on Y and tilted down 25-40°, lookAt the play plane. Standard resize (.aspect + updateProjectionMatrix + setSize).
+- ACTORS: billboarded textured PlaneGeometry (NOT THREE.Sprite, so they light and cast shadows). MeshStandardMaterial({ map, transparent:true, alphaTest:0.5 }); castShadow and receiveShadow; billboard by copying the camera's yaw to the plane each frame (grounded, upright). Build sprite textures with the SAME multi-layer Canvas2D factory as 2D (outline mandatory).
+- ENVIRONMENT: a real 3D ground PlaneGeometry with a CanvasTexture tile pattern (receiveShadow); procedural box/cylinder props (castShadow) as buildings/trees; THREE.Fog or FogExp2 for depth haze; gradient sky via scene.background color or a large inverted gradient sphere.
+- LIGHTING: AmbientLight + DirectionalLight; renderer.shadowMap.enabled = true with THREE.PCFSoftShadowMap — this lit, soft-shadowed stack is the core of the look.
+- ANIMATION: spritesheet offset on the billboard + bob/squash via plane scale; environment props sway via transforms; all Clock-delta scaled.
+- EFFECTS: faux-bloom via additive glow quads over emissive points; THREE.Points particles; optional custom THREE.ShaderMaterial with inline GLSL template strings (dissolve/scanline/water/hit-flash); screen shake, flashes, trails.""",
+
+    "3d": """RENDER STYLE: 3D — full procedural meshes:
+- CAMERA: THREE.PerspectiveCamera fov ~50-60; write your OWN follow/orbit camera (OrbitControls is a banned addon). Standard resize.
+- ACTORS: build as THREE.Group part-hierarchies (torso/limbs/head as separate primitives) so they read as detailed and animate. MeshStandardMaterial with metalness/roughness; emissive + emissiveIntensity accents for glow; combine Box/Sphere/Cylinder/Cone/TorusGeometry plus LatheGeometry/ExtrudeGeometry (both in core r128) for bevels and curves.
+- WORLD: scene.fog; gradient sky via a large SphereGeometry rendered with side: THREE.BackSide and a canvas-gradient texture; procedural ground (PlaneGeometry, or displaced BufferGeometry for hills); scattered procedural props.
+- LIGHTING: AmbientLight + DirectionalLight; renderer.shadowMap.enabled = true (THREE.PCFSoftShadowMap); key objects cast and receive shadows.
+- ANIMATION: transform/sine-driven animation of THREE.Group children (e.g. walk cycle = sine limb rotations), delta-scaled. No external clips/GLTF.
+- EFFECTS: additive glow sprites/quads, THREE.Points particle systems (AdditiveBlending), custom THREE.ShaderMaterial with inline GLSL template strings, screen shake, flashes, trails.""",
+}
+
+def tech_spec_for(render_style):
+    """Composes the base runtime contract with the per-mode rendering addendum."""
+    style = render_style if render_style in TECH_SPEC_ADDENDA else "3d"
+    return TECH_SPEC_BASE + "\n\n" + TECH_SPEC_ADDENDA[style]
+
+def fill_spec(prompt_template, render_style):
+    """Injects the per-mode runtime contract into a prompt template at call time."""
+    return prompt_template.replace("__TECH_SPEC__", tech_spec_for(render_style))
+
+# Back-compat default used by prompts that bake the contract at import time.
+TECH_SPEC = tech_spec_for("3d")
 
 # Multi-file response protocol shared by the integration and update roles.
 FILE_BLOCK_SPEC = """MULTI-FILE OUTPUT PROTOCOL (when you must return files):
@@ -314,8 +356,10 @@ DESIGN RULES:
 3. "assets_needed": 0-4 OPTIONAL decorative asset searches. They only produce metadata stubs; the game never loads them — list them purely as thematic inspiration.
 4. "advanced_mechanics": 3-6 concrete mechanics implementable with procedural geometry, ALWAYS including both "Touch joystick + buttons (mobile)" and "Keyboard + mouse (PC)".
 5. Never plan anything that needs a build tool, server-side code, module syntax, or external assets.
+6. Choose "render_style" from the user's request: if the user names a style obey it (pixel/sprite/side-scroller/retro/2D -> "2d"; HD-2D/2.5D/Octopath/diorama/tactics -> "hd2d"; 3D/first-person/racer/voxel/mesh -> "3d"); otherwise infer from genre (platformer/shmup/puzzle -> "2d"; top-down RPG/adventure/tactical with depth -> "hd2d"; FPS/racer/flight/sandbox -> "3d"). If genuinely ambiguous, default "3d".
+7. Provide "art_direction": a palette (hex list), mood, lighting, and a detail_bar describing the high-detail look. Reflect the chosen render_style consistently in each file's description.
 
-THINKING: Reason as deeply as you need inside your private thinking section first (game design, interfaces, risks). Everything AFTER your thinking must be ONLY the JSON object.
+THINKING: Reason as deeply as you need inside your private thinking section first (game design, render style, interfaces, risks). Everything AFTER your thinking must be ONLY the JSON object.
 
 CRITICAL OUTPUT RULES:
 1. After your thinking, output ONLY one valid JSON object. Its first character MUST be { and its last character MUST be }.
@@ -324,13 +368,15 @@ CRITICAL OUTPUT RULES:
 EXPECTED JSON SHAPE:
 {
   "game_name": "Name",
+  "render_style": "2d" | "hd2d" | "3d",
+  "art_direction": {"palette": ["#hex", "..."], "mood": "...", "lighting": "...", "detail_bar": "..."},
   "files": [
     {"filename": "index.html", "description": "Viewport meta; three.js r128 CDN tag then game.js tag; HUD elements #hud, #score; overlay screens #overlay, #overlay-title, #overlay-msg, #overlay-btn; touch controls #joystick-zone, #btn-action; inline CSS"},
     {"filename": "game.js", "description": "Defines initGame(), startGame(), endGame(), restartGame(); reads the element IDs above; scene/camera/renderer; keyboard+mouse and touch joystick input; delta-time loop; telemetry POST"}
   ],
-  "assets_needed": [{"filename": "short_name", "prompt": "3D search description"}],
+  "assets_needed": [{"filename": "short_name", "prompt": "thematic search description"}],
   "advanced_mechanics": ["Touch joystick + buttons (mobile)", "Keyboard + mouse (PC)", "..."]
-}""".replace("__TECH_SPEC__", TECH_SPEC)
+}""".replace("__TECH_SPEC__", TECH_SPEC_BASE)
 
 CODER_PROMPT = """You are the Nexus-G Lead Engineer — a staff-level WebGL/Three.js programmer. You write production code that ships to players unmodified, in one pass. You are meticulous: every identifier you reference exists, every code path terminates, both input schemes work, and the file is complete from its first line to its last.
 
@@ -353,7 +399,7 @@ THINKING: Use your private thinking section to architect the file (structures, e
 CRITICAL OUTPUT RULES:
 1. After your thinking, output ONLY the raw content of the requested file.
 2. The first character after your thinking is the first character of the file (for example `<` for HTML).
-3. NO conversational text, NO explanations, NO markdown fences.""".replace("__TECH_SPEC__", TECH_SPEC)
+3. NO conversational text, NO explanations, NO markdown fences."""
 
 FIXER_PROMPT = """You are the Nexus-G Debug Surgeon. You receive ONE file and ONE concrete error or validation report. Fix it with the minimum change necessary.
 
@@ -363,11 +409,11 @@ RULES:
 3. The corrected file must satisfy this contract:
 __TECH_SPEC__
 
-THINKING: Diagnose the error in your private thinking section first. Everything AFTER your thinking must be ONLY the corrected file.
+THINKING (in your private section, in this order): 1) name the ROOT CAUSE of the error in one line; 2) state the MINIMAL change that fixes it; 3) then write the file. Everything AFTER your thinking must be ONLY the corrected file.
 
 CRITICAL OUTPUT RULES:
 1. After your thinking, output the COMPLETE corrected file — every line, top to bottom.
-2. Raw content only: no commentary, no markdown fences.""".replace("__TECH_SPEC__", TECH_SPEC)
+2. Raw content only: no commentary, no markdown fences."""
 
 REVIEWER_PROMPT = """You are the Nexus-G Adversarial Reviewer — a hostile senior engineer paid to find what is genuinely BROKEN. You receive one file under review (plus sibling project files for cross-reference). Hunt ONLY for real defects:
 
@@ -384,7 +430,7 @@ DECISION PROTOCOL (follow exactly):
 APPROVED
 - Otherwise reply with the COMPLETE corrected file: raw content only, no commentary, no markdown fences, no diff — the whole file.
 
-HARD RULE: never rewrite working code for style, taste, or "improvement". Fix defects only. When in doubt, reply APPROVED.""".replace("__TECH_SPEC__", TECH_SPEC)
+HARD RULE: never rewrite working code for style, taste, or "improvement". Fix defects only. When in doubt, reply APPROVED."""
 
 INTEGRATION_PROMPT = """You are the Nexus-G Release Integrator. You receive ALL files of a finished build. Verify ONLY the cross-file contracts:
 
@@ -402,7 +448,7 @@ DECISION PROTOCOL (follow exactly):
 NO_CHANGES_NEEDED
 - Otherwise return ONLY the files that must change (complete content for each) using the protocol below. Do NOT invent new files. Do NOT restyle working code — minimal cross-file repairs only.
 
-__FILE_BLOCK_SPEC__""".replace("__TECH_SPEC__", TECH_SPEC).replace("__FILE_BLOCK_SPEC__", FILE_BLOCK_SPEC)
+__FILE_BLOCK_SPEC__""".replace("__FILE_BLOCK_SPEC__", FILE_BLOCK_SPEC)
 
 UPDATE_PROMPT = """You are the Nexus-G Live-Ops Engineer. You receive a working game's full file set plus ONE change request. Apply the request the way a careful senior engineer edits production code:
 
@@ -414,17 +460,42 @@ __TECH_SPEC__
 
 OUTPUT:
 - Plan the change in your private thinking section first; everything AFTER your thinking must be ONLY the file blocks.
+- If a CHANGE BLUEPRINT is provided, treat it as the authoritative scope: edit exactly its target_files, honor every item in preserve, guard against its risks, and add only its new_files.
 - Return ONLY the files you changed (complete content for each), via the protocol below.
 - You may add at most 2 NEW files if the request truly requires them (and you must wire them into index.html in the same response).
 - No commentary outside the blocks.
 
-__FILE_BLOCK_SPEC__""".replace("__TECH_SPEC__", TECH_SPEC).replace("__FILE_BLOCK_SPEC__", FILE_BLOCK_SPEC)
+__FILE_BLOCK_SPEC__""".replace("__FILE_BLOCK_SPEC__", FILE_BLOCK_SPEC)
 
 JSON_REPAIR_PROMPT = """You are a strict JSON repair machine. The user gives you text that was MEANT to be one valid JSON object but is malformed (stray prose, markdown fences, bad quotes/commas, truncation). Reconstruct the intended object, preserving all of its content.
 
 OUTPUT RULES:
 1. After any private thinking, output ONLY the corrected JSON object. First character {, last character }.
 2. No fences, no commentary."""
+
+UPDATE_BLUEPRINT_PROMPT = """You are the Nexus-G Change Architect. Given a change request for an existing browser game plus its file list and plan, produce a SHORT JSON blueprint that scopes the work precisely. Do NOT write code.
+
+THINKING: Reason privately about the smallest correct change — which existing files it touches, what must NOT regress, and what could break. Everything AFTER your thinking must be ONLY the JSON object.
+
+OUTPUT (JSON only, first character {, last character }):
+{
+  "target_files": ["existing files you will edit"],
+  "new_files": ["only if truly required, else empty"],
+  "edits": ["concrete, specific edits to make"],
+  "preserve": ["existing behavior/features that must NOT change or regress"],
+  "risks": ["what could break; how to guard against it"]
+}
+No prose, no markdown fences."""
+
+DEEP_FIXER_PROMPT = """You are the Nexus-G Senior Fix Engineer. Two quick fixes have already FAILED to make this file valid. Reconsider it holistically with the full project context provided.
+
+__TECH_SPEC__
+
+You MAY restructure the file, but you MUST preserve its public interface (the global function names, variable names and element IDs other files rely on) and satisfy the runtime contract above.
+
+THINKING: Privately diagnose the REAL root cause the quick fixes missed, then plan the corrected file. Everything AFTER your thinking must be ONLY the complete corrected file.
+
+OUTPUT: the COMPLETE corrected file — raw content only, no commentary, no markdown fences."""
 
 CONTINUE_INSTRUCTION = (
     "Your previous message hit the length limit mid-output. Continue EXACTLY where you stopped, "
@@ -838,6 +909,10 @@ def parse_plan(raw, allow_repair=True):
         plan["assets_needed"] = []
     if not isinstance(plan.get("advanced_mechanics"), list):
         plan["advanced_mechanics"] = []
+    style = plan.get("render_style")
+    plan["render_style"] = style if style in ("2d", "hd2d", "3d") else "3d"
+    if not isinstance(plan.get("art_direction"), dict):
+        plan["art_direction"] = {}
     return plan
 
 FILE_BLOCK_RE = re.compile(r'^===FILE:\s*(.+?)\s*===\s*\n(.*?)\n?^===END FILE===\s*$', re.MULTILINE | re.DOTALL)
@@ -929,11 +1004,53 @@ def test_syntax(filename):
     # Ignore other file types (HTML, CSS, GLSL, etc.) for strict syntax checking
     return True, ""
 
+def _strip_module_type(html):
+    """Removes type="module" from <script> tags (the one safe mechanical auto-fix)."""
+    return re.sub(r'(<script\b[^>]*?)\s+type\s*=\s*["\']module["\']', r'\1', html, flags=re.IGNORECASE)
+
+def validate_static(filename, content):
+    """Cheap regex checks for the most common procedural-contract violations.
+
+    Returns (hard, soft): `hard` are high-confidence violations worth a model fix;
+    `soft` are heuristic and logged only. No external dependencies.
+    """
+    hard, soft = [], []
+    is_html = filename.endswith((".html", ".htm"))
+    is_js = filename.endswith(".js")
+
+    if is_html and re.search(r'<script\b[^>]*\btype\s*=\s*["\']module["\']', content, re.IGNORECASE):
+        hard.append('index.html uses <script type="module"> — use a plain classic <script> tag (no ES modules).')
+    if re.search(r'examples/jsm|OrbitControls|GLTFLoader|EffectComposer|UnrealBloomPass|ShaderPass|RenderPass|OutlinePass', content):
+        hard.append("Uses a Three.js examples/jsm addon that is absent from the r128 global build — replace it with hand-written logic.")
+    if re.search(r'\.(glb|gltf|obj|fbx|usd)\b', content, re.IGNORECASE):
+        hard.append("References an external 3D model file — all visuals must be procedural (no model loading).")
+    if re.search(r'TextureLoader\s*\([^)]*\)\s*\.\s*load\s*\(', content) or re.search(r'\bnew\s+Audio\s*\(', content):
+        hard.append("Loads an external texture/audio asset — use CanvasTexture / inline WebAudio instead.")
+    if re.search(r'<img\b[^>]*\bsrc\s*=\s*["\']https?:', content, re.IGNORECASE) or re.search(r'url\(\s*["\']?https?:', content, re.IGNORECASE):
+        hard.append("Loads an external image URL — all visuals must be procedural.")
+    for m in re.finditer(r'fetch\(\s*["\']([^"\']+)["\']', content):
+        target = m.group(1)
+        if target.startswith("http") and "/telemetry" not in target:
+            hard.append(f"Network fetch to {target} — only the local ./telemetry POST is allowed.")
+            break
+
+    if is_js and "THREE." in content and "requestAnimationFrame" in content and "/telemetry" not in content:
+        soft.append("This game script may be missing the ./telemetry POST.")
+
+    return hard, soft
+
+def _autofix_file(fname, code):
+    """Applies the safe mechanical auto-fixes (currently: strip <script type=module> in HTML)."""
+    if fname.endswith((".html", ".htm")):
+        return _strip_module_type(code)
+    return code
+
 def accept_candidate(fname, old_code, new_code):
     """Anti-regression gate for model rewrites (review/integration/update passes).
 
     A candidate replaces the existing code only if it is non-empty, not
-    suspiciously shorter than the original, and passes the syntax check.
+    suspiciously shorter than the original, passes the syntax check, and (for
+    HTML) does not introduce a procedural-contract violation the old file lacked.
     Returns the code that should be kept.
     """
     new_code = (new_code or "").strip()
@@ -942,6 +1059,13 @@ def accept_candidate(fname, old_code, new_code):
     if old_code and len(new_code) < len(old_code) * 0.5:
         logging.warning(f"Rejected candidate for {fname}: suspiciously short ({len(new_code)} vs {len(old_code)} chars).")
         return old_code
+    if fname.endswith((".html", ".htm")):
+        new_code = _strip_module_type(new_code)
+        new_hard, _ = validate_static(fname, new_code)
+        old_hard, _ = validate_static(fname, old_code) if old_code else ([], [])
+        if new_hard and not old_hard:
+            logging.warning(f"Rejected HTML candidate for {fname}: introduces contract violations {new_hard}")
+            return old_code
     candidate_name = f".candidate.{os.path.basename(fname)}"
     candidate_path = os.path.join(WORKSPACE_DIR, candidate_name)
     try:
@@ -1054,8 +1178,16 @@ def build_context(state, current_file=None, include_files=True):
     except (TypeError, ValueError):
         plan_json = str(plan)
 
+    render_style = plan.get("render_style", "3d")
+    art = plan.get("art_direction") if isinstance(plan.get("art_direction"), dict) else {}
+    art_summary = "; ".join(f"{k}: {v}" for k, v in art.items() if v)
+    style_line = f"RENDER STYLE: {render_style} — follow that style's recipe in the runtime contract exactly."
+    if art_summary:
+        style_line += f"\nART DIRECTION: {art_summary}"
+
     parts = [
         f"USER REQUEST:\n{state.get('prompt', '')}",
+        style_line,
         f"PROJECT PLAN (source of truth for filenames and public interfaces):\n{plan_json}",
         "ASSET POLICY REMINDER: anything under ./assets/ is a metadata stub, never a loadable model — all visuals must be procedural.",
     ]
@@ -1124,6 +1256,7 @@ def generate_file(state, file_info):
     adversarial self-review -> save. Returns True on success.
     """
     fname = file_info["filename"]
+    style = (state.get("plan") or {}).get("render_style", "3d")
     speak(f"Generating {fname}...")
     fpath = os.path.join(WORKSPACE_DIR, fname)
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
@@ -1136,35 +1269,61 @@ def generate_file(state, file_info):
         f"MECHANICS TO COVER ACROSS THE PROJECT: {state['plan'].get('advanced_mechanics')}\n"
         f"Output the raw file content only."
     )
-    code = clean_code(ask_model(CODER_PROMPT, request, role="coder"))
+    code = clean_code(ask_model(fill_spec(CODER_PROMPT, style), request, role="coder"))
     if not code:
         return False
 
+    code = _autofix_file(fname, code)
     with open(fpath, 'w') as f:
         f.write(code)
 
-    # --- Syntax gate + surgical fix loop ---
+    # --- Validation gate (syntax + static contract checks) + diagnose/fix loop ---
     passed, err = test_syntax(fname)
+    hard, soft = validate_static(fname, code)
+    for note in soft:
+        logging.info(f"{fname} static note: {note}")
     fixes = 0
-    while not passed and fixes < MAX_FIX_ITERATIONS:
+    while (not passed or hard) and fixes < MAX_FIX_ITERATIONS:
         fixes += 1
-        speak(f"Fixing a syntax error in {fname} (attempt {fixes})...")
-        logging.warning(f"Syntax error in {fname} (fix attempt {fixes}): {err}")
+        problem = err if not passed else ""
+        if hard:
+            problem += ("\n" if problem else "") + "CONTRACT ISSUES:\n- " + "\n- ".join(hard)
+        speak(f"Fixing {fname} (attempt {fixes})...")
+        logging.warning(f"Validation issue in {fname} (fix attempt {fixes}): {problem}")
         fix_request = (
             f"FILE: {fname}\n"
-            f"VALIDATION ERROR:\n{err}\n\n"
+            f"VALIDATION REPORT:\n{problem}\n\n"
             f"CURRENT CONTENT:\n{code}\n\n"
             f"Return the complete corrected file."
         )
-        fixed = clean_code(ask_model(FIXER_PROMPT, fix_request, role="fixer"))
+        fixed = clean_code(ask_model(fill_spec(FIXER_PROMPT, style), fix_request, role="fixer"))
         if not fixed:
             break
-        code = fixed
+        code = _autofix_file(fname, fixed)
         with open(fpath, 'w') as f:
             f.write(code)
         passed, err = test_syntax(fname)
+        hard, soft = validate_static(fname, code)
+
+    # --- Deep-fix escalation: one holistic pass with full project context ---
     if not passed:
-        logging.warning(f"{fname} still failing validation after {fixes} fix attempts; keeping best effort.")
+        speak(f"Escalating to a deep fix for {fname}...")
+        logging.warning(f"{fname} still failing syntax after {fixes} quick fixes; deep-fixing.")
+        deep_request = (
+            f"{build_context(state, current_file=fname)}\n\n"
+            f"FILE: {fname}\n"
+            f"The quick fixes did not resolve this. Latest error:\n{err}\n\n"
+            f"CURRENT CONTENT:\n{code}\n\n"
+            f"Return the complete corrected file."
+        )
+        deep = clean_code(ask_model(fill_spec(DEEP_FIXER_PROMPT, style), deep_request, role="deep_fixer"))
+        if deep:
+            code = _autofix_file(fname, deep)
+            with open(fpath, 'w') as f:
+                f.write(code)
+            passed, err = test_syntax(fname)
+        if not passed:
+            logging.warning(f"{fname} still failing validation after deep fix; keeping best effort.")
 
     # --- Adversarial self-review pass (max quality mode, online only) ---
     if QUALITY_MODE != "fast" and is_connected() and cloud_client and fname not in state.get("reviewed_files", []):
@@ -1175,7 +1334,7 @@ def generate_file(state, file_info):
             f"CONTENT:\n{code}\n\n"
             f"Reply APPROVED, or reply with the complete corrected file."
         )
-        verdict_raw = ask_model(REVIEWER_PROMPT, review_request, role="reviewer")
+        verdict_raw = ask_model(fill_spec(REVIEWER_PROMPT, style), review_request, role="reviewer")
         if verdict_raw:
             first_line = verdict_raw.strip().split("\n", 1)[0].strip()
             if first_line.startswith("APPROVED"):
@@ -1261,7 +1420,8 @@ def integration_review(state):
         f"COMPLETE BUILD:\n\n" + "\n\n".join(sections) +
         "\n\nReply NO_CHANGES_NEEDED, or return only the corrected files via the protocol."
     )
-    raw = ask_model(INTEGRATION_PROMPT, request, role="integration")
+    style = (state.get("plan") or {}).get("render_style", "3d")
+    raw = ask_model(fill_spec(INTEGRATION_PROMPT, style), request, role="integration")
     if raw:
         verdict, blocks = parse_file_blocks(raw)
         if verdict:
@@ -1352,6 +1512,21 @@ def _register_new_plan_files(state, added_files, request):
         files.append({"filename": fname, "description": f"Added by change request: {snippet}"})
         known.add(fname)
 
+_BLUEPRINT_KEYWORDS = (
+    "add", "new ", "system", "mode", "level", "screen", "menu", "enemy", "enemies",
+    "boss", "inventory", "weapon", "multiple", "feature", "rework", "redesign",
+    "overhaul", "mechanic", "stage", "also", "as well", "plus ", "replace",
+)
+
+def _needs_blueprint(user_prompt):
+    """True when an adjustment is structural enough to warrant a planning pass first."""
+    text = " ".join(str(user_prompt).split())
+    body = text[len("update"):] if text.lower().startswith("update") else text
+    if len(body.strip()) > 80:
+        return True
+    low = body.lower()
+    return any(kw in low for kw in _BLUEPRINT_KEYWORDS)
+
 def run_update(state, user_prompt):
     """Stacks a change request onto the WHOLE current build (not just game.js)."""
     speak("Stacking your change onto the current build...")
@@ -1377,14 +1552,39 @@ def run_update(state, user_prompt):
         speak("There is no existing build to update. Describe a new game instead.")
         return
 
+    style = (state.get("plan") or {}).get("render_style", "3d")
+
+    # --- Blueprint stage: scope structural changes before editing (one cheap call) ---
+    blueprint_block = ""
+    if _needs_blueprint(user_prompt):
+        speak("Blueprinting the change first...")
+        bp_request = (
+            f"CHANGE REQUEST:\n{user_prompt}\n\n"
+            f"RENDER STYLE: {style}\n"
+            f"PROJECT PLAN:\n{json.dumps(state.get('plan') or {}, indent=2)}\n\n"
+            f"EXISTING FILES: {', '.join(current_files.keys())}\n\n"
+            "Produce the JSON change blueprint."
+        )
+        bp_raw = ask_model(UPDATE_BLUEPRINT_PROMPT, bp_request, role="update_planner")
+        try:
+            blueprint = extract_json(bp_raw)
+            blueprint_block = (
+                "CHANGE BLUEPRINT (authoritative scope — edit exactly target_files, "
+                "honor preserve, guard risks, add only new_files):\n"
+                + json.dumps(blueprint, indent=2) + "\n\n"
+            )
+        except (ValueError, TypeError):
+            logging.warning("Update blueprint was unparseable; proceeding without it.")
+
     sections = [f"===FILE: {fname}===\n{content}\n===END FILE===" for fname, content in current_files.items()]
     request = (
         f"CHANGE REQUEST:\n{user_prompt}\n\n"
+        f"{blueprint_block}"
         f"PROJECT PLAN:\n{json.dumps(state.get('plan') or {}, indent=2)}\n\n"
         f"CURRENT BUILD:\n\n" + "\n\n".join(sections) +
         "\n\nReturn ONLY the changed files via the protocol."
     )
-    raw = ask_model(UPDATE_PROMPT, request, role="update")
+    raw = ask_model(fill_spec(UPDATE_PROMPT, style), request, role="update")
     if not raw:
         speak("The update request failed. Please try again.")
         return
