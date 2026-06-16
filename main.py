@@ -3,6 +3,8 @@ import json
 import time
 import random
 import queue
+import shutil
+import tempfile
 import subprocess
 import requests
 import threading
@@ -87,6 +89,7 @@ ROLE_PARAMS = {
     "json_repair": {"temperature": 0.6, "top_p": 0.95, "max_tokens": 8192},
     "update_planner": {"temperature": 0.5, "top_p": 0.95, "max_tokens": 4096},
     "deep_fixer":     {"temperature": 0.6, "top_p": 0.95, "max_tokens": 16384},
+    "playtest_fixer": {"temperature": 0.5, "top_p": 0.95, "max_tokens": 16384},
 }
 
 # ==========================================
@@ -419,6 +422,7 @@ REVIEWER_PROMPT = """You are the Nexus-G Adversarial Reviewer — a hostile seni
 
 - Runtime errors: undefined variables/functions, references to element IDs that exist in no provided file, syntax slips, use-before-define across script load order.
 - Truncated or unreachable logic; event listeners never attached; game states that cannot be reached or exited; restart that does not reset state.
+- PLAYABILITY (the game must be playable, not just load): the player/avatar is actually created, added to the scene, and within the camera's view; input handlers are wired to the movement/action logic so controls really move the player; the animation loop is STARTED (requestAnimationFrame is actually called) and calls renderer.render every frame; the camera is positioned/oriented to see the playfield (not stuck at the origin looking at nothing); scoring/win/lose actually triggers and the game is neither instantly over nor impossible to lose; nothing is referenced before it is defined or under a misspelled name.
 - Contract violations (below): missing touch OR keyboard input path, non-responsive canvas, forbidden module syntax/addons/asset loads, missing telemetry, missing lighting/HUD/game-over.
 
 __TECH_SPEC__
@@ -494,6 +498,16 @@ __TECH_SPEC__
 You MAY restructure the file, but you MUST preserve its public interface (the global function names, variable names and element IDs other files rely on) and satisfy the runtime contract above.
 
 THINKING: Privately diagnose the REAL root cause the quick fixes missed, then plan the corrected file. Everything AFTER your thinking must be ONLY the complete corrected file.
+
+OUTPUT: the COMPLETE corrected file — raw content only, no commentary, no markdown fences."""
+
+PLAYTEST_FIXER_PROMPT = """You are the Nexus-G Playtest Fix Engineer. The game PARSES and LOADS but CRASHES AT RUNTIME, which makes it unplayable even though the server serves it. You are given the exact runtime error (with its stack) and the file to fix.
+
+__TECH_SPEC__
+
+Fix the ROOT CAUSE of the runtime crash so the game actually runs and is playable. The most common causes are: a misspelled or undefined function/variable name; calling something before it is defined; reading a property of an undefined object; a value that is never initialized; an animation-loop function that throws on a frame. Preserve the file's public interface and ALL working behavior — change only what is needed to stop the crash and make the game playable.
+
+THINKING: privately identify EXACTLY which name is undefined or which value is null/undefined and why, trace how it reaches the reported error, then write the corrected file. Everything AFTER your thinking must be ONLY the complete corrected file.
 
 OUTPUT: the COMPLETE corrected file — raw content only, no commentary, no markdown fences."""
 
@@ -1004,6 +1018,338 @@ def test_syntax(filename):
     # Ignore other file types (HTML, CSS, GLSL, etc.) for strict syntax checking
     return True, ""
 
+# ==========================================
+# 7b. HEADLESS PLAYTEST (runtime crash detection)
+# ==========================================
+# `node --check` only proves a file PARSES; it never runs it. A game can parse,
+# load, and still throw at runtime (a misspelled function, an undefined value in
+# the animation loop) — which freezes the screen and makes it unplayable even
+# though the server serves it. This stage EXECUTES the assembled game under a
+# stubbed browser/WebGL/THREE environment in Node and reports genuine runtime
+# crashes (a ReferenceError = a real undefined-reference bug in any browser) so a
+# targeted fixer can repair them. It is best-effort: if Node is missing or the
+# result is ambiguous, the build proceeds exactly as before.
+PLAYTEST_HARNESS_JS = r'''
+'use strict';
+var fs = require('fs');
+var vm = require('vm');
+
+function makeStub() {
+  var target = function stub() {};
+  return new Proxy(target, {
+    get: function (t, prop) {
+      if (prop === Symbol.toPrimitive) return function () { return 0; };
+      if (prop === Symbol.iterator) return function () { return [][Symbol.iterator](); };
+      if (prop === Symbol.toStringTag) return 'Stub';
+      if (prop === 'then') return undefined;
+      if (prop === 'length') return 0;
+      if (prop === 'nodeType') return 1;
+      if (prop === 'prototype') { if (!t.__p) t.__p = {}; return t.__p; }
+      if (typeof prop === 'symbol') return undefined;
+      if (Object.prototype.hasOwnProperty.call(t, prop)) return t[prop];
+      var s = makeStub(); t[prop] = s; return s;
+    },
+    set: function (t, prop, val) { t[prop] = val; return true; },
+    has: function () { return true; },
+    apply: function () { return makeStub(); },
+    construct: function () { return makeStub(); }
+  });
+}
+
+var rafQueue = [];
+var box = {};
+box.globalThis = box; box.window = box; box.self = box; box.top = box; box.parent = box;
+box.console = console;
+box.Math = Math; box.JSON = JSON; box.Date = Date; box.Array = Array; box.Object = Object;
+box.String = String; box.Number = Number; box.Boolean = Boolean; box.Symbol = Symbol;
+box.Map = Map; box.Set = Set; box.WeakMap = WeakMap; box.WeakSet = WeakSet;
+box.Promise = Promise; box.RegExp = RegExp; box.Function = Function;
+box.Error = Error; box.TypeError = TypeError; box.RangeError = RangeError; box.SyntaxError = SyntaxError;
+box.Float32Array = Float32Array; box.Float64Array = Float64Array;
+box.Uint8Array = Uint8Array; box.Uint16Array = Uint16Array; box.Uint32Array = Uint32Array;
+box.Int8Array = Int8Array; box.Int16Array = Int16Array; box.Int32Array = Int32Array;
+box.Uint8ClampedArray = Uint8ClampedArray; box.ArrayBuffer = ArrayBuffer; box.DataView = DataView;
+box.parseInt = parseInt; box.parseFloat = parseFloat; box.isNaN = isNaN; box.isFinite = isFinite;
+box.encodeURIComponent = encodeURIComponent; box.decodeURIComponent = decodeURIComponent;
+box.performance = { now: function () { return Date.now(); } };
+box.requestAnimationFrame = function (cb) { rafQueue.push(cb); return rafQueue.length; };
+box.cancelAnimationFrame = function () {};
+box.setTimeout = function () { return 0; }; box.clearTimeout = function () {};
+box.setInterval = function () { return 0; }; box.clearInterval = function () {};
+box.requestIdleCallback = function () { return 0; }; box.cancelIdleCallback = function () {};
+box.queueMicrotask = function () {};
+box.navigator = { userAgent: 'node', platform: 'node', maxTouchPoints: 0, language: 'en', vendor: '', getGamepads: function () { return []; } };
+box.devicePixelRatio = 1; box.innerWidth = 1280; box.innerHeight = 720; box.outerWidth = 1280; box.outerHeight = 720;
+box.scrollX = 0; box.scrollY = 0; box.pageXOffset = 0; box.pageYOffset = 0;
+box.location = { href: 'http://localhost/', protocol: 'http:', host: 'localhost', hostname: 'localhost', port: '', pathname: '/', search: '', hash: '', origin: 'http://localhost', reload: function () {}, replace: function () {}, assign: function () {} };
+box.history = { pushState: function () {}, replaceState: function () {}, back: function () {}, forward: function () {}, go: function () {} };
+box.localStorage = { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {}, clear: function () {} };
+box.sessionStorage = box.localStorage;
+box.alert = function () {}; box.confirm = function () { return true; }; box.prompt = function () { return ''; };
+box.addEventListener = function () {}; box.removeEventListener = function () {}; box.dispatchEvent = function () { return true; };
+box.matchMedia = function () { return { matches: false, media: '', addListener: function () {}, removeListener: function () {}, addEventListener: function () {}, removeEventListener: function () {} }; };
+box.getComputedStyle = function () { return makeStub(); };
+box.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, orientation: { type: 'landscape-primary', angle: 0, addEventListener: function () {}, lock: function () { return Promise.resolve(); } } };
+box.fetch = function () { return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({}); }, text: function () { return Promise.resolve(''); } }); };
+box.AudioContext = function () { return makeStub(); }; box.webkitAudioContext = box.AudioContext;
+box.Audio = function () { return makeStub(); }; box.Image = function () { return makeStub(); };
+box.Worker = function () { return makeStub(); }; box.SharedWorker = function () { return makeStub(); };
+box.WebSocket = function () { return makeStub(); }; box.XMLHttpRequest = function () { return makeStub(); };
+box.URL = function () { return makeStub(); }; box.URLSearchParams = function () { return makeStub(); };
+box.Blob = function () { return makeStub(); }; box.File = function () { return makeStub(); }; box.FileReader = function () { return makeStub(); };
+box.FormData = function () { return makeStub(); }; box.Headers = function () { return makeStub(); };
+box.ResizeObserver = function () { return makeStub(); }; box.IntersectionObserver = function () { return makeStub(); };
+box.MutationObserver = function () { return makeStub(); }; box.PerformanceObserver = function () { return makeStub(); };
+box.OffscreenCanvas = function () { return makeStub(); }; box.Path2D = function () { return makeStub(); };
+box.DOMParser = function () { return makeStub(); }; box.XMLSerializer = function () { return makeStub(); };
+box.Event = function () { return makeStub(); }; box.CustomEvent = function () { return makeStub(); };
+box.KeyboardEvent = function () { return makeStub(); }; box.MouseEvent = function () { return makeStub(); };
+box.PointerEvent = function () { return makeStub(); }; box.TouchEvent = function () { return makeStub(); };
+box.WheelEvent = function () { return makeStub(); }; box.DragEvent = function () { return makeStub(); };
+box.WebGLRenderingContext = function () {}; box.WebGL2RenderingContext = function () {};
+box.THREE = makeStub();
+
+function makeEl() { return makeStub(); }
+var docTarget = makeStub();
+box.document = new Proxy(docTarget, {
+  get: function (t, prop) {
+    if (prop === 'createElement' || prop === 'createElementNS') return function () { return makeEl(); };
+    if (prop === 'createTextNode' || prop === 'createDocumentFragment') return function () { return makeEl(); };
+    if (prop === 'getElementById') return function () { return makeEl(); };
+    if (prop === 'querySelector') return function () { return makeEl(); };
+    if (prop === 'querySelectorAll' || prop === 'getElementsByTagName' || prop === 'getElementsByClassName' || prop === 'getElementsByName') return function () { return []; };
+    if (prop === 'addEventListener' || prop === 'removeEventListener') return function () {};
+    if (prop === 'body') { if (!t.__body) t.__body = makeEl(); return t.__body; }
+    if (prop === 'head') { if (!t.__head) t.__head = makeEl(); return t.__head; }
+    if (prop === 'documentElement') { if (!t.__de) t.__de = makeEl(); return t.__de; }
+    if (prop === 'readyState') return 'complete';
+    if (prop === 'hidden') return false;
+    if (prop === 'visibilityState') return 'visible';
+    if (prop === 'fullscreenElement' || prop === 'pointerLockElement') return null;
+    if (prop === 'cookie') return '';
+    if (typeof prop === 'symbol') return undefined;
+    if (Object.prototype.hasOwnProperty.call(t, prop)) return t[prop];
+    var s = makeStub(); t[prop] = s; return s;
+  },
+  set: function (t, prop, val) { t[prop] = val; return true; },
+  has: function () { return true; }
+});
+
+var ctx = vm.createContext(box);
+var firstError = null;
+function record(phase, e) {
+  if (firstError) return;
+  firstError = { phase: phase, name: (e && e.name) || 'Error', message: String((e && e.message) || e), stack: String((e && e.stack) || '') };
+}
+
+var files = process.argv.slice(2);
+for (var i = 0; i < files.length; i++) {
+  var src = '';
+  try { src = fs.readFileSync(files[i], 'utf8'); } catch (e) { continue; }
+  try { vm.runInContext(src, ctx, { filename: files[i], timeout: 5000 }); }
+  catch (e) { record('load:' + files[i], e); }
+  if (firstError) break;
+}
+
+if (!firstError) {
+  var entries = ['init', 'initGame', 'setup', 'main', 'boot', 'start', 'startGame', 'beginGame', 'run', 'play'];
+  for (var k = 0; k < entries.length; k++) {
+    try { if (typeof box[entries[k]] === 'function') box[entries[k]](); }
+    catch (e) { record('call:' + entries[k], e); break; }
+  }
+}
+
+if (!firstError) {
+  var frames = 0;
+  try {
+    while (rafQueue.length && frames < 45) {
+      var cb = rafQueue.shift();
+      frames++;
+      if (typeof cb === 'function') cb(1000 + frames * 16);
+    }
+  } catch (e) { record('frame', e); }
+}
+
+process.stdout.write(firstError ? JSON.stringify(firstError) : 'OK');
+'''
+
+SCRIPT_TAG_RE = re.compile(r'<script\b([^>]*)>(.*?)</script>', re.IGNORECASE | re.DOTALL)
+SCRIPT_SRC_RE = re.compile(r'\bsrc\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+def _assemble_runtime_sources(state):
+    """Returns ordered (label, source) JS chunks that the browser would execute,
+    reconstructed from index.html's script tags (external libs are skipped — they
+    are stubbed), falling back to the build's .js files."""
+    sources = []
+    html_path = os.path.join(WORKSPACE_DIR, "index.html")
+    html = ""
+    if os.path.isfile(html_path):
+        try:
+            with open(html_path, 'r') as f:
+                html = f.read()
+        except OSError:
+            html = ""
+    if html:
+        inline_idx = 0
+        for m in SCRIPT_TAG_RE.finditer(html):
+            attrs, body = m.group(1), m.group(2)
+            if re.search(r'type\s*=\s*["\']module["\']', attrs, re.IGNORECASE):
+                continue
+            src_m = SCRIPT_SRC_RE.search(attrs)
+            if src_m:
+                src = src_m.group(1)
+                if src.startswith("http") or src.startswith("//"):
+                    continue  # external library (e.g. the THREE CDN) — already stubbed
+                local = safe_filename(src)
+                p = os.path.join(WORKSPACE_DIR, local) if local else ""
+                if local and os.path.isfile(p):
+                    try:
+                        with open(p, 'r') as f:
+                            sources.append((local, f.read()))
+                    except OSError:
+                        pass
+            elif body.strip():
+                inline_idx += 1
+                sources.append((f"index.html#inline{inline_idx}", body))
+    if not sources:
+        for fname in ["game.js"] + [f for f in state.get("completed_files", []) if f.endswith(".js")]:
+            if any(lbl == fname for lbl, _ in sources):
+                continue
+            p = os.path.join(WORKSPACE_DIR, fname)
+            if os.path.isfile(p):
+                try:
+                    with open(p, 'r') as f:
+                        sources.append((fname, f.read()))
+                except OSError:
+                    pass
+    return sources
+
+def playtest_runtime(state):
+    """Executes the assembled game headlessly in Node and returns a crash dict
+    {name, message, phase, stack, hard, file} or None when it runs clean / cannot
+    be tested. `hard` is True for a ReferenceError (a real undefined-reference bug).
+    """
+    try:
+        subprocess.run(["node", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        logging.warning("Node.js not found; skipping headless playtest.")
+        return None
+    except Exception:
+        return None
+
+    sources = _assemble_runtime_sources(state)
+    if not sources:
+        return None
+
+    tmp = tempfile.mkdtemp(prefix="nexus_playtest_")
+    try:
+        harness_path = os.path.join(tmp, "_harness.js")
+        with open(harness_path, 'w') as f:
+            f.write(PLAYTEST_HARNESS_JS)
+        temp_to_label = {}
+        arg_paths = []
+        for n, (label, source) in enumerate(sources):
+            safe = re.sub(r'[^A-Za-z0-9_.]', "_", label)
+            tp = os.path.join(tmp, f"{n:02d}__{safe}.js")
+            with open(tp, 'w') as f:
+                f.write(source)
+            temp_to_label[os.path.basename(tp)] = label
+            arg_paths.append(tp)
+        try:
+            res = subprocess.run(["node", harness_path] + arg_paths,
+                                 capture_output=True, text=True, timeout=40)
+        except subprocess.TimeoutExpired:
+            logging.warning("Headless playtest timed out (possible infinite loop).")
+            return {"name": "Timeout", "message": "playtest timed out", "phase": "run",
+                    "stack": "", "hard": False, "file": "game.js"}
+        out = (res.stdout or "").strip()
+        if out == "OK" or not out:
+            return None
+        try:
+            crash = json.loads(out)
+        except (ValueError, TypeError):
+            logging.info(f"Playtest produced unparseable output; ignoring: {out[:200]}")
+            return None
+        crash["hard"] = crash.get("name") == "ReferenceError"
+        # Map the crash back to an editable build file via the stack frames.
+        label = None
+        stack = crash.get("stack", "") + " " + crash.get("phase", "")
+        for base, lbl in temp_to_label.items():
+            if base in stack:
+                label = lbl
+                break
+        if label is None and sources:
+            label = sources[-1][0]
+        if label and label.startswith("index.html"):
+            crash["file"] = "index.html"
+        elif label and label.endswith(".js"):
+            crash["file"] = label
+        else:
+            crash["file"] = "game.js"
+        return crash
+    except Exception as e:
+        logging.warning(f"Headless playtest error (skipped): {e}")
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def playtest_and_fix(state, max_iters=2):
+    """Runs the headless playtest and, when it finds a real runtime crash, asks a
+    targeted fixer to repair the offending file so the game becomes playable."""
+    if not (is_connected() and cloud_client):
+        crash = playtest_runtime(state)
+        if crash and crash.get("hard"):
+            logging.warning(f"Playtest found a runtime crash (offline, not fixed): {crash.get('message')}")
+        return
+
+    style = (state.get("plan") or {}).get("render_style", "3d")
+    for attempt in range(max_iters):
+        crash = playtest_runtime(state)
+        if not crash:
+            if attempt:
+                speak("Runtime crash fixed — the game is playable now.")
+            return
+        if not crash.get("hard"):
+            logging.info(f"Playtest advisory ({crash.get('name')}: {crash.get('message')}); not auto-fixing.")
+            return
+        target = crash.get("file") or "game.js"
+        fpath = os.path.join(WORKSPACE_DIR, target)
+        if not os.path.isfile(fpath):
+            target = "game.js"
+            fpath = os.path.join(WORKSPACE_DIR, target)
+            if not os.path.isfile(fpath):
+                return
+        try:
+            with open(fpath, 'r') as f:
+                code = f.read()
+        except OSError:
+            return
+        speak(f"The game loads but crashes at runtime ({crash.get('name')}). Fixing {target}...")
+        logging.warning(f"Playtest crash in {target}: {crash.get('name')}: {crash.get('message')}")
+        report = (
+            f"{build_context(state, current_file=target)}\n\n"
+            f"RUNTIME CRASH (the game loads but is unplayable):\n"
+            f"  error: {crash.get('name')}: {crash.get('message')}\n"
+            f"  phase: {crash.get('phase', '')}\n"
+            f"  stack:\n{crash.get('stack', '')[:1500]}\n\n"
+            f"FILE TO FIX: `{target}`\n\n"
+            f"CURRENT CONTENT:\n{code}\n\n"
+            f"Return the complete corrected file."
+        )
+        fixed = clean_code(ask_model(fill_spec(PLAYTEST_FIXER_PROMPT, style), report, role="playtest_fixer"))
+        accepted = accept_candidate(target, code, _autofix_file(target, fixed))
+        if accepted == code:
+            logging.warning(f"Playtest fix for {target} was rejected or unchanged; stopping.")
+            return
+        with open(fpath, 'w') as f:
+            f.write(accepted)
+        logging.info(f"Applied playtest fix to {target}.")
+
+    final = playtest_runtime(state)
+    if final and final.get("hard"):
+        speak("I applied fixes but the game may still have a runtime issue — check the preview console.")
+        logging.warning(f"Playtest still failing after {max_iters} fixes: {final.get('message')}")
+
 def _strip_module_type(html):
     """Removes type="module" from <script> tags (the one safe mechanical auto-fix)."""
     return re.sub(r'(<script\b[^>]*?)\s+type\s*=\s*["\']module["\']', r'\1', html, flags=re.IGNORECASE)
@@ -1036,6 +1382,11 @@ def validate_static(filename, content):
 
     if is_js and "THREE." in content and "requestAnimationFrame" in content and "/telemetry" not in content:
         soft.append("This game script may be missing the ./telemetry POST.")
+    if is_js and "THREE." in content:
+        if "requestAnimationFrame" not in content:
+            soft.append("No requestAnimationFrame loop found — the game may never animate or update.")
+        if ".render(" not in content:
+            soft.append("No renderer.render(...) call found — the screen may stay blank.")
 
     return hard, soft
 
@@ -1606,6 +1957,7 @@ def run_update(state, user_prompt):
                 state["integration_done"] = False
                 save_state(state)
                 integration_review(state)
+            playtest_and_fix(state)
             speak(f"Change stacked onto the build — touched: {', '.join(changed)}. Refresh the preview!")
         else:
             speak("The change produced no valid file edits, so the build was left untouched.")
@@ -1676,6 +2028,7 @@ def run_nexus_g(user_prompt):
         time.sleep(2)
 
     integration_review(state)
+    playtest_and_fix(state)
 
     state["status"] = "done"
     save_state(state)
