@@ -54,6 +54,14 @@ print("[System] Nexus-G Initializing...")
 NVIDIA_MODEL = "qwen/qwen3.5-397b-a17b"
 MODEL_DISPLAY = "Qwen3.5 397B A17B (NVIDIA)"
 
+# Qwen3.5's official recommended inference settings for thinking-mode coding are
+# temperature 0.6 / top_p 0.95 / top_k 20. The OpenAI SDK has no native top_k
+# field, so it is passed via extra_body; if the NVIDIA endpoint rejects it the
+# call falls back to standard sampling automatically and stops sending it for the
+# rest of the session (so quality is maximized when supported, never broken when not).
+QWEN_TOP_K = 20
+_extra_body_supported = [True]
+
 # --- QUALITY PIPELINE TUNING ---
 # "max"  = full agentic pipeline: plan -> code -> verify -> self-review -> integration review
 # "fast" = skip the self-review and integration passes (fewer API requests per build)
@@ -615,14 +623,17 @@ def _stream_chat_once(messages, params, max_retries=5):
             finish_reason = None
             last_pulse = time.time()
             pulsed = False
-            completion = cloud_client.chat.completions.create(
+            create_kwargs = dict(
                 model=NVIDIA_MODEL,
                 messages=messages,
                 temperature=params["temperature"],
                 top_p=params["top_p"],
                 max_tokens=max_tokens,
-                stream=True
+                stream=True,
             )
+            if _extra_body_supported[0]:
+                create_kwargs["extra_body"] = {"top_k": QWEN_TOP_K}
+            completion = cloud_client.chat.completions.create(**create_kwargs)
             for chunk in completion:
                 if chunk.choices:
                     choice = chunk.choices[0]
@@ -667,6 +678,10 @@ def _stream_chat_once(messages, params, max_retries=5):
                 if "max_token" in error_message and max_tokens > 1024:
                     max_tokens = max(1024, max_tokens // 2)
                     logging.warning(f"API rejected max_tokens; retrying with {max_tokens}.")
+                    continue
+                if _extra_body_supported[0]:
+                    _extra_body_supported[0] = False
+                    logging.warning("Endpoint rejected extra params (top_k); retrying with standard sampling only.")
                     continue
                 logging.error(f"API 400 Bad Request: {e}")
                 print(f"\n[API 400 Error]: The API rejected the payload. Details: {e}")
